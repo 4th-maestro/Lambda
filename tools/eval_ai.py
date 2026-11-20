@@ -49,10 +49,7 @@ def match(expected, calls):
     first = calls[0]
     if first['name'] != expected['tool']:
         return False, f"도구 불일치 {first['name']}"
-    want = {'view': 'auto', **expected['args']} if first['name'] != 'create_schedule' and 'view' not in expected['args'] else expected['args']
-    diff = [k for k, v in want.items() if k != 'view' and first['args'].get(k) != v]
-    if 'view' in expected['args'] and first['args'].get('view') != expected['args']['view']:
-        diff.append('view')
+    diff = [k for k, v in expected['args'].items() if first['args'].get(k) != v]
     return not diff, '일치' if not diff else f"인자 불일치 {', '.join(f'{k}={first['args'].get(k)}' for k in diff)}"
 
 
