@@ -250,7 +250,22 @@ Step Functions는 초안 생성까지 실행되고, 사람 대기는 DynamoDB의
 
 인식 전용 작업은 실행 입력에 `detect` 목록이 있습니다. `Route`가 `Detect`로 바로 이동하고, `AfterDetect`가 `SaveDetections`(S3 `putObject`로 첫 결과 저장) → `SaveDraft`로 보냅니다. 같은 `Detect` 상태를 쓰므로 인식 처리는 한 곳에서 관리합니다.
 
-모든 Task와 Map의 오류는 `MarkFailed`(`status: failed`, `error`) → `Fail`로 처리합니다. Lambda 호출은 Lambda 서비스 오류에 한해 3회 재시도합니다. 2026-11-20 TestState API(목 결과)로 `Init`, `Route`, `NeedDetect`, `Parse`, `Detect`, `Merge`, `SaveDetections`, `SaveDraft`, `MarkFailed`의 식 평가를 확인했습니다. 전체 실행은 배포 후 미확인입니다.
+모든 Task와 Map의 오류는 `MarkFailed`(`status: failed`, `error`) → `Fail`로 처리합니다. Lambda 호출은 Lambda 서비스 오류에 한해 3회 재시도합니다. 2026-11-20 TestState API(목 결과)로 `Init`, `Route`, `NeedDetect`, `Parse`, `Detect`, `Merge`, `SaveDetections`, `SaveDraft`, `MarkFailed`의 식 평가를 확인했습니다. 같은 날 실제 API·상태 머신 전체 흐름도 아래와 같이 검증했습니다.
+
+### 실제 배포·통합 검증 (2026-11-20)
+
+- PR #43을 `dev`, PR #44를 `main`에 반영하고 커밋 `b39a8fc` 기준으로 `maestro` 스택을 배포했습니다.
+  파서는 검증한 x86_64 이미지, 나머지 함수는 arm64입니다. 스택 `UPDATE_COMPLETE`, 파서 `Active`를 확인했습니다.
+- 백엔드 테스트 164개 중 162개 통과·2개 건너뜀, 실제 Lambda x86_64 이미지의 파서 테스트는
+  17개 중 15개 통과·DWG 환경 검사 2개 건너뜀입니다. SAM lint·배포 아티팩트 검증도 통과했습니다.
+- 임시 계정으로 실제 HTTP API를 호출했습니다. JWT 없는 요청은 401, 관리자 그룹 없는 요청은 403입니다.
+  새 확정 경로에도 같은 권한 검사가 적용됨을 확인했습니다.
+- 테스트 IFC 업로드 → Step Functions 변환 → `review` → 보정본 `/confirm` → `done`을 확인했습니다.
+  Buildings·Rooms·Equipment, 기업 소속, 트윈·도면 JSON을 조회해 저장을 검증했습니다.
+  같은 확정 요청 재전송은 같은 결과를 반환하고 두 번째 버전을 만들지 않았습니다.
+- PNG 업로드 → 실제 실내기 인식 Endpoint 호출 → `review`, 잘못된 IFC → `failed` 기록도 확인했습니다.
+- 테스트 계정·기업·건물·작업 항목·업로드·초안·확정 파일은 검증 후 삭제했고 정리 오류는 없었습니다.
+- cfn-guard 전용 보안·준수 검사는 도구 미설치로 실행하지 않았습니다. 위 검증이 이를 대체하지 않습니다.
 
 | 함수 | 환경 변수 | 권한(도면 버킷) |
 |---|---|---|
