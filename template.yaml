@@ -1,0 +1,410 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Maestro 건물 운영 디지털트윈 API와 웹 호스팅
+
+Parameters:
+  ModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-5-5
+    # 비용 상한: Sonnet 5.5 이하만 허용(2026-11-20 결정)
+    AllowedValues: [global.anthropic.claude-sonnet-5-5, global.anthropic.claude-haiku-5-5]
+  BedrockRegion:
+    Type: String
+    Default: ap-northeast-2
+  AllowedOrigin:
+    Type: String
+    Default: '*'
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    CodeUri: src/
+    MemorySize: 512
+    Timeout: 10
+    Environment:
+      Variables:
+        SCHEDULES_TABLE: !Ref SchedulesTable
+        CHAT_TABLE: !Ref ChatTable
+
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowMethods: [GET, POST, DELETE]
+        AllowHeaders: [content-type, authorization]
+      # 모든 경로 로그인 필수: Cognito 액세스 토큰(Authorization: Bearer), CORS 사전 요청은 제외
+      Auth:
+        DefaultAuthorizer: Cognito
+        Authorizers:
+          Cognito:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience: [!Ref UserPoolClient]
+
+  SchedulesTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey: {Name: id, Type: String}
+
+  # 대화 기록(90일)과 대화 메모리(24시간), ttl 속성으로 자동 삭제(chat.py)
+  ChatTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: pk, AttributeType: S}, {AttributeName: sk, AttributeType: S}]
+      KeySchema: [{AttributeName: pk, KeyType: HASH}, {AttributeName: sk, KeyType: RANGE}]
+      TimeToLiveSpecification: {AttributeName: ttl, Enabled: true}
+
+  # 가입 허용 목록: 개별 이메일 또는 @도메인(allow.py), 관리자 화면에서 관리
+  AllowTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey: {Name: entry, Type: String}
+
+  # 운영자 계정: 허용 목록 이메일만 자체 가입(가입 전 검사), 이메일 인증 코드, 비밀번호 재설정은 인증된 이메일
+  # - 메일 발송: Cognito 기본 메일(하루 50통, 발신 no-reply@verificationemail.com)
+  # - 이름 Maestro 유지: 사용자 풀 이름 변경은 재생성(기존 계정 삭제)
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: maestro-operators
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+        InviteMessageTemplate:
+          EmailSubject: 에게(에너지게이트) 계정 안내
+          EmailMessage: '에게(에너지게이트) 계정이 발급되었습니다. 아이디 {username}, 임시 비밀번호 {####}로 로그인한 뒤 새 비밀번호를 설정하십시오.'
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: 에게(에너지게이트) 인증 코드
+        EmailMessage: '에게(에너지게이트) 인증 코드는 {####}입니다. 화면에 입력하십시오.'
+      AccountRecoverySetting: {RecoveryMechanisms: [{Name: verified_email, Priority: 1}]}
+      LambdaConfig: {PreSignUp: !GetAtt PreSignUpFunction.Arn}
+      Policies:
+        PasswordPolicy: {MinimumLength: 10, RequireLowercase: true, RequireNumbers: true, RequireUppercase: false, RequireSymbols: false, TemporaryPasswordValidityDays: 7}
+
+  # 웹 클라이언트: 비밀 키 없음, 비밀번호·갱신 토큰 인증, 계정 존재 여부 노출 방지
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits: {AccessToken: minutes, IdToken: minutes, RefreshToken: days}
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admin
+      Description: 허용 목록과 가입자 관리
+
+  # 가입 전 검사: 사용자 풀 → 함수 참조라 함수 쪽 환경 변수에 사용자 풀을 넣지 않음(순환 참조)
+  PreSignUpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: signup.handler
+      Environment:
+        Variables: {ALLOW_TABLE: !Ref AllowTable}
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref AllowTable}]
+
+  PreSignUpPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PreSignUpFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  AdminFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: admin.handler
+      Environment:
+        Variables: {ALLOW_TABLE: !Ref AllowTable, USER_POOL_ID: !Ref UserPool}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref AllowTable}
+        - Statement:
+            - Effect: Allow
+              Action: [cognito-idp:ListUsers, cognito-idp:ListUsersInGroup]
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        ListAllow: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/allow, Method: GET}}
+        AddAllow: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/allow, Method: POST}}
+        DeleteAllow: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/admin/allow/{entry}', Method: DELETE}}
+        Users: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/users, Method: GET}}
+
+  ChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: chat.handler
+      Policies: [DynamoDBCrudPolicy: {TableName: !Ref ChatTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /chat, Method: GET}}
+        Delete: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /chat, Method: DELETE}}
+
+  # WebSocket 연결 인증: 쿼리 token(액세스 토큰) 검증(auth.py), 결과 sub를 ask 라우트로 전달
+  WsAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: auth.handler
+      Environment:
+        Variables: {USER_POOL_ID: !Ref UserPool, USER_POOL_CLIENT_ID: !Ref UserPoolClient}
+
+  WsAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref WsApi
+      AuthorizerType: REQUEST
+      Name: maestro-ws-auth
+      IdentitySource: [route.request.querystring.token]
+      AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsAuthorizerFunction.Arn}/invocations
+
+  WsAuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsAuthorizerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/authorizers/${WsAuthorizer}
+
+  StatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: status.handler
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /rooms/status, Method: GET}}
+
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: query.handler
+      Timeout: 30
+      Environment:
+        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion}
+      Policies:
+        - DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
+        - Statement:
+            - Effect: Allow
+              # 응답 스트리밍(messages.stream)은 InvokeModelWithResponseStream 권한 필요
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              # global 추론 프로필은 프로필 ARN과 리전 없는 기반 모델 ARN 권한이 모두 필요
+              Resource:
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}
+                - !Sub
+                  - arn:aws:bedrock:*::foundation-model/${Base}
+                  - Base: !Select [1, !Split ['global.', !Ref ModelId]]
+      Events:
+        Post: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /query, Method: POST}}
+
+  # AI 질의 단계 실시간 전송: 클라이언트가 {action: 'ask'}를 보내면 WsFunction이 단계 이벤트를 연결로 전송
+  WsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${AWS::StackName}-ws
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsFunction.Arn}/invocations
+
+  WsConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $connect
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WsAuthorizer
+      Target: !Sub integrations/${WsIntegration}
+
+  WsDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${WsIntegration}
+
+  WsAskRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WsApi
+      RouteKey: ask
+      Target: !Sub integrations/${WsIntegration}
+
+  WsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    # 라우트가 없는 상태의 첫 자동 배포 실패 방지
+    DependsOn: [WsConnectRoute, WsDisconnectRoute, WsAskRoute]
+    Properties: {ApiId: !Ref WsApi, StageName: prod, AutoDeploy: true}
+
+  WsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/*
+
+  WsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: ws.handler
+      # 통합 응답 대기는 29초에서 끊기지만 함수는 계속 실행되어 이벤트 전송, 화면 제한 45초보다 길게 설정
+      Timeout: 60
+      Environment:
+        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion}
+      Policies:
+        - DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
+        - Statement:
+            - Effect: Allow
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              Resource:
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}
+                - !Sub
+                  - arn:aws:bedrock:*::foundation-model/${Base}
+                  - Base: !Select [1, !Split ['global.', !Ref ModelId]]
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/prod/POST/@connections/*
+
+  SchedulesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: schedules.handler
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref SchedulesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
+      Events:
+        List: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /schedules, Method: GET}}
+        Create: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /schedules, Method: POST}}
+        Delete: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/schedules/{id}', Method: DELETE}}
+
+  RecommendFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: recommend.handler
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /recommendations, Method: GET}}
+
+  AnomaliesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: anomalies.handler
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /anomalies, Method: GET}}
+
+  HistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: history.handler
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /rooms/history, Method: GET}}
+
+  # 전체 현황: 건물 4곳 호실 533개의 현재 상태, 오늘 사용량, 추천 합계 계산
+  PortfolioFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: portfolio.handler
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Get: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /buildings, Method: GET}}
+
+  # 건물별 전력 사용량 분석: 지난 날짜 시간별 kWh는 실행 환경 메모리에 캐시, 오늘만 요청마다 계산
+  EnergyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: energy.handler
+      # CPU 할당은 메모리 비례(1,769MB에서 vCPU 1개). 512MB(약 0.3 vCPU)는 첫 호출 compare/month(건물 4개 × 최대 62일, 로컬 2.0초)가 8초 초과 예상
+      MemorySize: 1769
+      # 첫 호출 최악 대비 여유, HTTP API 통합 제한 30초 미만
+      Timeout: 29
+      Policies: [DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}]
+      Events:
+        Compare: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/compare, Method: GET}}
+        Trend: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/trend, Method: GET}}
+        Heatmap: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/heatmap, Method: GET}}
+        Breakdown: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/breakdown, Method: GET}}
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  WebOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-web
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !Ref WebOac
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: web
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+        CustomErrorResponses:
+          - {ErrorCode: 403, ResponseCode: 200, ResponsePagePath: /index.html}
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub ${WebBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com
+  WebUrl:
+    Value: !Sub https://${WebDistribution.DomainName}
+  WebBucketName:
+    Value: !Ref WebBucket
+  WsUrl:
+    Description: Frontend VITE_WS_URL 값
+    Value: !Sub wss://${WsApi}.execute-api.${AWS::Region}.amazonaws.com/prod
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
