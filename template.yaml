@@ -291,7 +291,8 @@ Resources:
               Resource: !Sub '${PlansBucket.Arn}/jobs/*'
         - Statement:
             - Effect: Allow
-              Action: [cognito-idp:ListUsers, cognito-idp:ListUsersInGroup]
+              # 판매사 관리자 조회(tenant.admins)와 지정·해제(admin.set_admin)
+              Action: [cognito-idp:ListUsers, cognito-idp:ListUsersInGroup, cognito-idp:AdminAddUserToGroup, cognito-idp:AdminRemoveUserFromGroup]
               Resource: !GetAtt UserPool.Arn
             # 목록 권한은 접두어 조건 없이 버킷 전체: 없는 키 조회가 403 대신 NoSuchKey(404)가 되려면 필요
             - Effect: Allow
@@ -320,6 +321,7 @@ Resources:
         Heatmap: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/heatmap, Method: GET}}
         Breakdown: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /energy/breakdown, Method: GET}}
         Users: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/users, Method: GET}}
+        SetVendorAdmin: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/admin/users/{sub}/admin', Method: PUT}}
         ListCompanies: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/companies, Method: GET}}
         CreateCompany: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /admin/companies, Method: POST}}
         GetCompany: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/admin/companies/{id}', Method: GET}}
@@ -369,6 +371,7 @@ Resources:
           KB_ID: !Ref KnowledgeBase
           DECISIONS_TABLE: !Sub '${OpsPrefix}-Decisions'
           OPS_SETTINGS_TABLE: !Sub '${OpsPrefix}-OpsSettings'
+          USER_POOL_ID: !Ref UserPool
       Policies:
         - DynamoDBReadPolicy: {TableName: !Sub '${OpsPrefix}-Decisions'}
         - DynamoDBReadPolicy: {TableName: !Sub '${OpsPrefix}-OpsSettings'}
@@ -381,6 +384,10 @@ Resources:
         - DynamoDBReadPolicy: {TableName: !Ref BuildingOwnersTable}
         - DynamoDBReadPolicy: {TableName: !Ref CompaniesTable}
         - Statement:
+            # 판매사 관리자 판정(tenant.admins, Cognito admin 그룹 구성원 조회)
+            - Effect: Allow
+              Action: cognito-idp:ListUsersInGroup
+              Resource: !GetAtt UserPool.Arn
             - Effect: Allow
               # 응답 스트리밍(messages.stream)은 InvokeModelWithResponseStream 권한 필요
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
@@ -467,6 +474,7 @@ Resources:
           KB_ID: !Ref KnowledgeBase
           DECISIONS_TABLE: !Sub '${OpsPrefix}-Decisions'
           OPS_SETTINGS_TABLE: !Sub '${OpsPrefix}-OpsSettings'
+          USER_POOL_ID: !Ref UserPool
       Policies:
         - DynamoDBReadPolicy: {TableName: !Sub '${OpsPrefix}-Decisions'}
         - DynamoDBReadPolicy: {TableName: !Sub '${OpsPrefix}-OpsSettings'}
@@ -479,6 +487,10 @@ Resources:
         - DynamoDBReadPolicy: {TableName: !Ref BuildingOwnersTable}
         - DynamoDBReadPolicy: {TableName: !Ref CompaniesTable}
         - Statement:
+            # 판매사 관리자 판정(tenant.admins, Cognito admin 그룹 구성원 조회)
+            - Effect: Allow
+              Action: cognito-idp:ListUsersInGroup
+              Resource: !GetAtt UserPool.Arn
             - Effect: Allow
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
               Resource:
