@@ -5,7 +5,8 @@
 - 기간: 오늘을 제외한 최근 weeks번의 같은 요일(energy.py heatmap과 같은 기간 정의, 기본 4주)
 - 표본: 시간마다 HH:30 상태 1회(energy.py와 같음). 재실은 sim.py에서 시간 단위로 고정이라 표본 오차 없음
 - 캐시: 지난 날짜의 (호실, 날짜, 대상 스케줄)별 24시간 표본을 모듈 메모리에 보관(recommend.py after_hours와 같은 방식)
-- 쓰는 곳: recommend.py 추천 근거(frequency), tools.py usage_frequency 도구
+- 쓰는 곳: recommend.py 추천 근거(frequency), tools.py usage_frequency 도구, infra/ops 자동 운영 전력 이상 감지(baseline)
+- 평소 기준값(baseline): 같은 요일·같은 시각의 운전 주 수, 운전한 주의 평균 전력·최대 재실(재실로 설명되지 않는 전력 과다 판정용)
 """
 import datetime as dt
 import functools
@@ -20,13 +21,13 @@ WEEKS = 4
 
 @functools.lru_cache(maxsize=16384)
 def _day(rid, day, key, version=None):
-    # 하루 24시간 표본: (재실 여부, 빈 채 운전 여부)
+    # 하루 24시간 표본: (재실 여부, 빈 채 운전 여부, 운전 여부, 재실 인원, 전력 kW)
     room, schedules = buildings.BY_ROOM[rid], json.loads(key)
     d = dt.datetime.fromisoformat(day)
     out = []
     for h in range(24):
         s = sim.state(room, d.replace(hour=h, minute=30), schedules)
-        out.append((s['occupants'] > 0, s['onOff'] and s['occupants'] == 0))
+        out.append((s['occupants'] > 0, s['onOff'] and s['occupants'] == 0, s['onOff'], s['occupants'], s['powerKw']))
     return tuple(out)
 
 
@@ -71,6 +72,27 @@ def busy_hours(rates, threshold=0.5):
             out.append({'from': start, 'to': h})
             start = None
     return out
+
+
+def baseline(room, t, schedules=(), weeks=WEEKS, hour=None):
+    """t와 같은 요일, hour(기본 t의 시각) 한 시간의 평소 운전 기준값
+    - onWeeks: 운전한 주 수, onAvgKw: 운전한 주의 평균 전력(운전 주 없으면 None), onMaxOccupants: 운전한 주의 최대 재실
+    - 스케줄: 그날 이전에 만든 스케줄만 적용(createdAt 날짜 ≤ 그날, 없으면 적용). sim은 스케줄을 날짜 구분 없이 매일 적용하므로
+      그대로 쓰면 오늘 만든 스케줄이 지난주에도 있던 것처럼 계산되어 '평소와 다른 운전'을 찾을 수 없음
+    """
+    h = t.hour if hour is None else hour
+    ver = buildings.version()
+    on = []
+    for d in _days(t, weeks):
+        past = [s for s in schedules if str(s.get('createdAt') or '')[:10] <= d.date().isoformat()]
+        s = _day(room['id'], d.isoformat(), common.sched_key(past, [room['id']]), ver)[h]
+        if s[2]:
+            on.append(s)
+    return {
+        'weekday': '월화수목금토일'[t.weekday()], 'hour': h, 'weeks': weeks, 'onWeeks': len(on),
+        'onAvgKw': round(sum(x[4] for x in on) / len(on), 2) if on else None,
+        'onMaxOccupants': max((x[3] for x in on), default=0),
+    }
 
 
 def peak_hours(rates, n=3):
