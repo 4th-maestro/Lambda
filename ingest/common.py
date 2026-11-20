@@ -31,7 +31,8 @@ FLOOR_KO = re.compile(rf'(지하\s*)?(\d{{1,2}}|(?<![가-힣])[{KO_NUM}])\s*층'
 FLOOR_EN = re.compile(r'(?<![A-Za-z0-9])(B?)(\d{1,2})\s*F\b', re.I)
 
 # 실내기 용량, 장비 번호, 장비일람표(plan-ingest.md 3-5)
-NEAR = 2.5  # 실내기 중심과 용량·장비 번호 표기의 최대 거리(m)
+# 실내기 중심과 용량·장비 번호 표기의 최대 거리(m). 춘천초 실내기 37대의 표기 거리 0.96~4.41m 기준(2.5m는 5대 미연결)
+NEAR = 4.5
 KW = re.compile(r'(?<![\d.])(\d{1,3}(?:\.\d)?)\s*kW(?!\s*(?:이상|이하|초과|미만))', re.I)
 # 장비 번호: 영문 대문자 1~4자와 숫자(IU-1, CAC-01, FCU1, E-4.5HP). 도면 축 번호(X1, Y10)는 제외합니다.
 # shortcut: 숫자만 있는 번호(01)는 계통 번호, 치수, 호실 번호와 구분하지 못해 제외, 필요해지면 일람표 행과 일치하는 숫자만 허용
@@ -355,7 +356,7 @@ def merge(draft, detections):
     """YOLO 결과를 초안에 반영합니다. toPlan이 있는 층은 idus로 바꾸고, 없는 층은 floors[].detections에 둡니다.
 
     cls가 door인 결과는 실내기로 바꾸지 않습니다. toPlan이 있는 층은 floors[].doors로 바꾸고, 없는 층은 detections에 둡니다.
-    실내기 인식 상자에는 parse 단계에서 저장한 meta.ingest.texts의 용량(kw)과 장비 번호(tag)를 2.5m 이내에서 1:1로 붙입니다.
+    실내기 인식 상자에는 parse 단계에서 저장한 meta.ingest.texts의 용량(kw)과 장비 번호(tag)를 NEAR(4.5m) 이내에서 가까운 쌍부터 1:1로 붙입니다.
     축척(pxPerM)과 toPlan이 모두 없는 층은 거리를 m로 바꿀 수 없어 붙이지 않습니다.
     """
     floors = {f['id']: f for f in draft['floors']}

@@ -165,6 +165,8 @@ class CadTest(unittest.TestCase):
                          ('CAC-01', 14.5, 'cad-text', 'ARNU15GTRB4', 'source'))
         self.assertEqual(d['floors'][0]['rooms'][0]['name'], '회의실 201')
 
+    # 실제 대응 표와 무관하게 '용량은 있으나 표가 빔 → 유형 예시'를 점검
+    @patch.dict(common.TYPES, {'cassette_4way': {**common.TYPES['cassette_4way'], 'models': []}})
     def test_rendered_floor_texts_attach_to_detections(self):
         make_dxf(TMP / 'lab.dxf', with_unit=False, labels=True)
         s3 = upload(TMP / 'lab.dxf')
@@ -362,7 +364,8 @@ class CapacityTest(unittest.TestCase):
             self.assertEqual(m(model='X1', kw=13.0, kw_src='ifc'), ('X1', 'source', 13.0, 'ifc'))
             self.assertEqual(m(tag='E 4.5HP', schedule=rows), ('K130', 'exact', 13.0, 'schedule'))  # 일람표 용량으로 대응
             self.assertEqual(m(tag='IU1', kw=5.6, kw_src='cad-text', schedule=rows), ('AM130FN4DEH', 'schedule', 5.6, 'cad-text'))
-        self.assertEqual(m(kw=13.0, kw_src='pdf-text')[1], 'type')  # 대응 표가 비면 유형 예시
+        with patch.dict(common.TYPES, {'cassette_4way': {**common.TYPES['cassette_4way'], 'models': []}}):
+            self.assertEqual(m(kw=13.0, kw_src='pdf-text')[1], 'type')  # 대응 표가 비면 유형 예시
 
 
 class RuleTest(unittest.TestCase):
