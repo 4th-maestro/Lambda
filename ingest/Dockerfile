@@ -1,4 +1,5 @@
-# 도면 변환 컨테이너 Lambda(app.handler). 빌드: docker build --platform linux/arm64 -t maestro-ingest .
+# 도면 변환 컨테이너 Lambda(app.handler). 빌드: docker build --platform linux/amd64 -t maestro-ingest .
+# x86_64 전용: ifcopenshell 0.9.0의 aarch64 바이너리는 GLIBC 2.38을 요구해 Lambda 기본 이미지(2.34)에서 import 실패
 # 1단계: libredwg dwg2dxf 정적 빌드. libredwg는 GPL-3.0이며 별도 프로세스(subprocess)로만 호출합니다.
 FROM public.ecr.aws/lambda/python:3.12 AS libredwg
 ARG LIBREDWG=0.13.3
