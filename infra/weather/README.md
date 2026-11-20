@@ -202,5 +202,15 @@ aws secretsmanager delete-secret --secret-id maestro/dev/kma-api-key \
   Lambda는 `Active`, Python 3.12 / arm64, `LOCATION=98,77`입니다.
 - `Enabled: !If`를 사용한 최초 배포에서 규칙이 활성화되어 즉시 비활성화했습니다.
   `State: !If [RunSchedule, ENABLED, DISABLED]`로 수정해 다시 배포했습니다.
-- 시험용 빈 시크릿 `maestro/dev/kma-api-key`를 생성했습니다. 키 소유자의 값 입력 전이므로
-  실제 API 호출·DynamoDB 쓰기·30분 스케줄 검증은 아직 진행하지 않았습니다.
+- 키 담당자가 시험용 `maestro/dev/kma-api-key`와 정식 `maestro/kma-api-key`에
+  값을 입력했습니다. 확인 과정에서 키 값은 출력하지 않았습니다.
+- 시험·정식 Lambda 모두 실제 기상청 호출 후 `status=stored`를 반환하고
+  `maestro-Weather`에 저장했습니다. 같은 `location`/`ts`로 재호출한 뒤에도
+  항목 수는 1개였습니다.
+- 시험 스케줄은 19:55(KST) EventBridge `Invocations` 합계 1과 Lambda 저장 성공
+  로그로 자동 실행을 확인했습니다. 이후 시험 스케줄을 비활성화했습니다.
+- 정식 스택 `maestro-weather`는 PR #32가 머지된 `main` 커밋 `268cb4e`에서
+  배포했습니다. Lambda는 `Active`, `LOCATION=98,77`, 스케줄은
+  `ENABLED` / `rate(30 minutes)`입니다.
+- CloudTrail trail 조회 결과는 비어 있었습니다. 지속 보관되는 감사 로그 설정은
+  확인하지 못했으며, 템플릿 검증과 실행 검증은 이를 대신하지 않습니다.
