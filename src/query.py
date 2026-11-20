@@ -36,6 +36,19 @@ _FIELD = re.compile(r'"(conclusion|detail|action)"\s*:\s*"((?:[^"\\]|\\.)*)')
 _SENTENCE_END = re.compile(r'(?<=[가-힣)\]%][.?!])\s')
 
 
+# 층 미지정 제어 요청 검증: 범위(전체, 모든 층, 재실 0곳 등)를 말하지 않았는데 전체 층 초안을 요청하면 실행하지 않고 되묻게 함
+# - 프롬프트 지침만으로는 구조화 응답에서 층 추정 초안 발생(7차 평가 q22), 사용자 결정(2026-11-20 층 미지정은 되묻기)을 서버에서 강제
+SCOPE = re.compile(r'전체|모든|모두|전\s?층|재실\s?0|재실이?\s?없는')
+FLOOR_ASK = '층을 말하지 않은 제어 요청입니다. 초안을 만들지 말고 층 후보를 들어 되물으십시오.'
+
+
+def floor_given(text, memory):
+    """사용자가 전체 범위를 밝혔는지: 이번 질문, 직전 2턴 질문, 직전 초안(전체 층)"""
+    m = memory or {}
+    recent = [x.get('q', '') for x in (m.get('turns') or [])[-2:]]
+    return any(SCOPE.search(q) for q in [text, *recent]) or (m.get('draft') or {}).get('floor') == 'all'
+
+
 def _unescape(raw):
     # 스트리밍 중 잘린 이스케이프(\, \u00) 제거 후 JSON 문자열로 해석
     raw = re.sub(r'\\(u[0-9a-fA-F]{0,3})?$', '', raw)
@@ -174,8 +187,13 @@ def run(text, emit, bid=None, memory=None):
             break
         messages.append({'role': 'assistant', 'content': res.content})
         results, found = [], set()
+        asked_floor = False
         for block in res.content:
             if block.type != 'tool_use':
+                continue
+            if block.name == 'create_schedule' and block.input.get('floor') == 'all' and not floor_given(text, memory):
+                results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': FLOOR_ASK, 'is_error': True})
+                asked_floor = True
                 continue
             try:
                 out, view = tools.run(block.name, block.input, t, schedules, b['id'])
@@ -188,7 +206,9 @@ def run(text, emit, bid=None, memory=None):
             except (ValueError, KeyError, TypeError) as e:
                 results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': str(e), 'is_error': True})
         messages.append({'role': 'user', 'content': results})
-        if all(r.get('is_error') for r in results):
+        if asked_floor and all(r.get('is_error') for r in results):
+            step('query', 'done', chips=list(chips), detail='층 확인 필요')
+        elif all(r.get('is_error') for r in results):
             step('query', 'error', chips=list(chips), detail='조회 실패')
         else:
             step('query', 'done', chips=list(chips), detail=f'{len(found)}곳')

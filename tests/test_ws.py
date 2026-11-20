@@ -80,6 +80,23 @@ class RunTest(unittest.TestCase):
         events = []
         return query.run(text, events.append), events
 
+    def test_floor_unspecified_schedule_is_rejected(self):
+        # 층을 말하지 않은 제어 요청의 전체 층 초안은 실행하지 않고 되묻기(7차 평가 q22)
+        args = {'floor': 'all', 'use': '진료실', 'action': 'setpoint', 'time': '15:00', 'condition': 'always', 'setpoint': 22}
+        client = FakeClient(msg('tool_use', tool('create_schedule', args)), msg('end_turn', text(answer('어느 층에 적용할까요?', '1F, 2F, 전체'))))
+        query.client = client
+        result = query.run('진료실 설정온도 22도로 오후 3시부터', lambda e: None)
+        self.assertIsNone(result['draft'])
+        sent = client.calls[1]['messages'][-1]['content'][0]
+        self.assertTrue(sent['is_error'] and sent['content'] == query.FLOOR_ASK)
+        self.assertEqual(result['answer'], '어느 층에 적용할까요?\n1F, 2F, 전체')
+
+    def test_floor_scope_words_and_memory_allow_all(self):
+        self.assertTrue(query.floor_given('현재 재실 0곳인 곳은 꺼줘', None))
+        self.assertTrue(query.floor_given('15:30', {'turns': [{'q': '전체 층 사무실 꺼줘'}, {'q': '지금'}]}))
+        self.assertTrue(query.floor_given('15:30', {'draft': {'floor': 'all'}}))
+        self.assertFalse(query.floor_given('사무실 꺼줘', {'turns': [{'q': '전체 현황'}, {'q': '1층'}, {'q': '회의실'}]}))
+
     def test_tool_round_event_order(self):
         result, events = self.ask(msg('tool_use', tool('query_spaces', QUERY)), msg('end_turn', text(ANSWER_JSON)))
         self.assertEqual(steps(events), [
