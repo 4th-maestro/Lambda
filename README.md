@@ -52,6 +52,41 @@ AWS_PROFILE=maestro python tools/eval_operations.py --out eval/operations-result
 
 2026-11-21 로컬 구현 검증: 단위 테스트 177개 중 175개 통과·2개 건너뜀, 실제 모델 도구 선택 평가 8/8 통과. cfn-lint는 오류·경고 0개입니다. cfn-guard 3.3.0과 AWS 공식 규칙 6개로 QueryFunction·WsFunction의 생성 IAM 역할을 검사해 위반 0개를 확인했습니다(스택 전체 보안 감사나 계정의 배포 검증은 아님). 프런트는 빌드와 일괄 실행 테스트 2개를 통과했습니다. 이 검증은 로컬 코드 기준이며 운영 배포·실제 제안 실행 확인은 별도입니다.
 
+## 외기 관측 표시
+
+`GET /rooms/status`의 `outdoorTemp`는 `WEATHER_TABLE`이 있으면 부산대 격자 `98,77`의
+최신 기상청 관측값(`tempC`)을 숫자로 반환합니다. `outdoorSource`는 `kma`,
+`outdoorObservedAt`은 관측 시각의 KST ISO 문자열입니다.
+
+Lambda 실행 환경마다 조회 결과를 5분 보관합니다. 빈 결과와 읽기 실패도 캐시하며,
+관측 시각이 요청 시점보다 2시간 넘게 오래됐으면 캐시 중에도 사용하지 않습니다.
+환경 변수 미설정, 빈 테이블, 읽기 실패, 잘못된 관측값에는 기존 시뮬레이션 외기를 반환하고
+`outdoorSource: "sim"`, `outdoorObservedAt: null`로 출처를 표시합니다.
+읽기 실패는 경고 로그로 남깁니다. 미래 시각의 관측도 사용하지 않습니다.
+
+`ApiFunction`만 `${TwinPrefix}-Weather`(기본 `maestro-Weather`) 환경 변수와
+`DynamoDBReadPolicy`를 갖습니다. 기존 `maestro-twin` 소유 테이블을 읽으며 생성·수정하지 않습니다.
+SDK 연결·읽기 제한은 각각 1초, 요청 시도는 1회입니다. 프런트는 기존 `outdoorTemp`를 그대로 사용하고,
+실내 온도·전력 계산에 쓰는 `sim.outdoor_temp()`는 기존 가상 곡선을 유지합니다.
+
+응답 예시입니다(실제 관측값이 아닌 형식 설명).
+
+```json
+{"outdoorTemp": 3.8, "outdoorSource": "kma", "outdoorObservedAt": "2026-11-20T19:00:00+09:00"}
+```
+
+이 변경만 별도로 배포하지 않습니다. `dev` 통합 후 승인된 `main` 배포에서 함께 반영하고,
+그 뒤 실제 `GET /rooms/status`와 Weather 최신 항목의 값·관측 시각을 대조하십시오.
+
+참고: [Boto3 Query](https://docs.aws.amazon.com/boto3/latest/reference/services/dynamodb/table/query.html),
+[SAM DynamoDBReadPolicy](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-policy-template-list.html#dynamodbreadpolicy).
+
+2026-11-21 로컬 검증(Python 3.12): 전체 테스트 201개 중 199개 통과,
+Pillow 미설치로 기존 테스트 2개 건너뜀입니다. 외기 테스트 10개와 실제 boto3의
+Stubber 기반 Query·Decimal 변환 검증을 통과했습니다. SAM lint와 추가 Weather 읽기 정책에서
+생성된 IAM 역할에 대한 AWS 공식 cfn-guard 규칙 6개를 통과했습니다.
+스택 전체 보안 감사, 계정의 배포 사전 검증, 배포 API 실측 대조는 수행하지 않았습니다.
+
 ## 테스트
 
 ```bash
