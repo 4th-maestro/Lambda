@@ -19,10 +19,11 @@
 | `src/comfort.py` | 불쾌지수(기상청 식)와 단계, PMV·PPD(ISO 7730 반복 계산, 외부 패키지 없음) |
 | `kb/` | Knowledge Base 원본 문서(규정·쾌적 지표)와 `.md.metadata.json`(문서명, 원문 주소, 시행일, 원문 확인일). 근거는 [KB 문서 원문 확인](../docs/human/explanation/research/kb-sources.md) |
 | `tools/kb_sync.sh` | `kb/`를 KB 원본 버킷에 동기화하고 수집 작업 실행 후 완료 대기 |
-| `src/buildings.py`, `src/buildings.json` | 건물 4곳(본관 공개 IFC, 가상 3곳), 건물별 호실과 운영 프로필 |
+| `src/buildings.py`, `src/buildings.json` | 건물·호실 조회. 배포 환경은 `maestro-twin` 스택의 Buildings·Rooms 테이블(60초 캐시), 로컬·테스트는 `buildings.json`·`rooms.json` |
 | `src/sim.py`, `src/rooms.json` | 가상 HVAC 상태 생성, 본관 호실 137개(공개 IFC 의원 건물) |
 | `tools/demo_status.py` | Frontend 데모 상태 생성(`frontend/public/demo/<건물>.json`, `index.json`) |
 | `tools/build_floorplans.py` | 건물별 3D 도면 생성(`frontend/public/floorplans/<건물>.json`) |
+| `src/plan.py`, `tools/upload_plans.py` | 도면 API `GET /buildings/{id}/plan`(도면 버킷 `plans/<건물>/current.json`), 초기 적재(`--bucket <PlansBucketName>`) |
 | `src/chat.py` | `GET·DELETE /chat?building=` 사용자별 대화 기록(90일), 대화 메모리(24시간, 1KB 요약) 저장 |
 | `src/auth.py` | WebSocket 연결 인증(쿼리 token, Cognito 액세스 토큰 검증) |
 

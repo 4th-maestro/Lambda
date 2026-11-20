@@ -164,7 +164,7 @@ def run(text, emit, bid=None, memory=None):
     for _ in range(4):  # 문서 검색 후 계산 도구까지 4회
         chips = []  # 이번 라운드 도구 인자 조건(병렬 호출은 합침)
         with client.messages.stream(
-            model=MODEL, max_tokens=4096, system=prompt, tools=tools.TOOLS,
+            model=MODEL, max_tokens=4096, system=prompt, tools=tools.definitions(),
             output_config={'effort': 'low', 'format': ANSWER_FORMAT}, messages=messages,
         ) as stream:
             buf, shown = '', ''  # 라운드별 부분 JSON, 화면에 보낸 칸 텍스트
