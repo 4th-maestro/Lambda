@@ -16,10 +16,12 @@
 5분마다 auto-operator
  ├─ 후보: 빈 방 운전 = 지금·15분 전·30분 전 모두 재실 0명인데 운전 중 (src/recommend.py 'idle' 규칙과 같은 기준)
  │        이상     = 설정온도 미도달(sim.state anomaly) → Jev 없이 🔴 알림
- ├─ Jev 판단(빈 방): room_empty = empty / occupied / uncertain + 확신도
+ ├─ Jev 판단(빈 방): room_empty = empty / occupied / uncertain + 확신도·확률
+ │   입력 = 건물·호실, 0·15·30분 전 상태 + 파생 사실(facts: 운영 시간 안팎·종료 후 경과, 빈 채 운전 지속 시간,
+ │          오늘 마지막 재실·사용 구간 수, 최근 7일 같은 시각 사용 일수, 빈 채 운전 전력량)
  └─ 결정 게이트
-     ├─ occupied를 기준 이상 확신      → skipped (조치·제안 없음)
-     ├─ 스위치 ON + empty를 기준 이상 확신 → 🟢 끄기 스케줄 저장(applied) + "껐어요" 알림, [되돌리기]
+     ├─ occupied + 확신도 0.8 이상                  → skipped (조치·제안 없음)
+     ├─ 스위치 ON + empty + 확신도 0.8 이상 + empty 확률 0.9 이상 → 🟢 끄기 스케줄 저장(applied) + "껐어요" 알림, [되돌리기]
      └─ 그 외(스위치 OFF, 확신도 낮음, Jev 실패) → 🟡 제안(pending) "…끌까요?" [수락] [거절]
 ```
 

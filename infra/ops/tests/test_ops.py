@@ -24,7 +24,11 @@ import sim  # noqa: E402
 import tenant  # noqa: E402
 
 T = dt.datetime(2026, 11, 20, 19, 0, tzinfo=sim.KST)  # 운영 시간 뒤: 빈 방 운전 후보가 생기는 시각
-EMPTY = lambda s: {'choice': 'empty', 'confidence': 0.95}  # noqa: E731
+EMPTY = lambda s: {'choice': 'empty', 'confidence': 0.95, 'probabilities': {'empty': 0.97, 'occupied': 0.01, 'uncertain': 0.02}}  # noqa: E731
+
+
+def ans(choice, conf, empty=None):
+    return {'choice': choice, 'confidence': conf, 'probabilities': {} if empty is None else {'empty': empty}}
 
 
 class Store:
@@ -61,12 +65,15 @@ class Store:
 
 class GateTest(unittest.TestCase):
     def test_gate(self):
-        self.assertEqual(op.gate({'choice': 'empty', 'confidence': 0.95}, True, 0.9), 'applied')
-        self.assertEqual(op.gate({'choice': 'empty', 'confidence': 0.95}, False, 0.9), 'pending')  # 스위치 OFF는 항상 제안
-        self.assertEqual(op.gate({'choice': 'empty', 'confidence': 0.7}, True, 0.9), 'pending')   # 확신도 낮으면 제안
-        self.assertEqual(op.gate({'choice': 'occupied', 'confidence': 0.95}, True, 0.9), 'skipped')
-        self.assertEqual(op.gate({'choice': 'uncertain', 'confidence': 0.99}, True, 0.9), 'pending')
-        self.assertEqual(op.gate(None, True, 0.9), 'pending')  # Jev 실패 폴백
+        g = lambda a, on=True: op.gate(a, on, 0.8, 0.9)  # noqa: E731
+        self.assertEqual(g(ans('empty', 0.86, 0.91)), 'applied')          # 2026-11-20 실측 C 사례
+        self.assertEqual(g(ans('empty', 0.86, 0.91), on=False), 'pending')  # 스위치 OFF는 항상 제안
+        self.assertEqual(g(ans('empty', 0.7, 0.95)), 'pending')            # 확신도 낮으면 제안
+        self.assertEqual(g(ans('empty', 0.85, 0.8)), 'pending')            # empty 확률 낮으면 제안
+        self.assertEqual(g(ans('empty', 0.95)), 'pending')                 # 확률 없으면 자동 조치 안 함
+        self.assertEqual(g(ans('occupied', 0.85)), 'skipped')
+        self.assertEqual(g(ans('uncertain', 0.99)), 'pending')
+        self.assertEqual(g(None), 'pending')                               # Jev 실패 폴백
 
     def test_judge_failure_returns_none(self):
         def boom(state):
@@ -154,6 +161,41 @@ class OperatorTest(unittest.TestCase):
         st = op.jev_state(buildings.get('main'), room, T, [])
         self.assertEqual([r['minutesAgo'] for r in st['recent']], [0, 15, 30])
         self.assertNotIn('rule', st)
+        self.assertNotIn('facts', op.jev_state(buildings.get('main'), room, T, [], facts=False))  # 이전 형식
+
+
+class FactsTest(unittest.TestCase):
+    B = {'weekend': False}
+
+    def test_hours_facts(self):
+        room = {'hours': (9, 18)}
+        h = op.hours_facts(room, self.B, T)  # 금 19:00
+        self.assertEqual((h['inOperatingHours'], h['minutesSinceClose'], h['minutesUntilOpen']), (False, 60, None))
+        h = op.hours_facts(room, self.B, T.replace(hour=13, minute=30))
+        self.assertEqual((h['inOperatingHours'], h['minutesUntilClose']), (True, 270))
+        h = op.hours_facts(room, self.B, T.replace(hour=7))
+        self.assertEqual((h['inOperatingHours'], h['minutesUntilOpen']), (False, 120))
+        sat = T + dt.timedelta(days=1)
+        self.assertFalse(op.hours_facts(room, self.B, sat)['workday'])          # 주말 미운영
+        self.assertTrue(op.hours_facts(room, {'weekend': True}, sat)['workday'])
+        self.assertTrue(op.hours_facts({'hours': (8, 24)}, self.B, T.replace(hour=23))['inOperatingHours'])  # 24시 종료
+
+    def test_usage_facts_consistent_with_sim(self):
+        room = next(r for r in buildings.rooms('main') if op.is_idle(r, T, []))
+        f = op.usage_facts(room, T, [])
+        self.assertGreaterEqual(f['idleOnMinutes'], 30)  # 후보 조건(30분)과 일치
+        self.assertEqual(f['slotsToday'], 19 * 4 + 1)    # 00:00~19:00, 15분 간격
+        occ = [sim.state(room, T.replace(hour=0, minute=0) + dt.timedelta(minutes=15 * i), [])['occupants'] for i in range(77)]
+        self.assertEqual(f['occupiedSlotsToday'], sum(o > 0 for o in occ))
+        if f['lastOccupiedAt']:
+            hh, mm = map(int, f['lastOccupiedAt'].split(':'))
+            self.assertGreater(sim.state(room, T.replace(hour=hh, minute=mm), [])['occupants'], 0)
+        self.assertLessEqual(f['usedAtThisTimeLast7Days'], 7)
+
+    def test_never_occupied_room(self):
+        room = dict(buildings.rooms('main')[0], use='기타')  # sim은 '기타' 용도를 항상 0명으로 계산
+        f = op.usage_facts(room, T, [])
+        self.assertEqual((f['lastOccupiedAt'], f['minutesSinceLastOccupied'], f['occupiedSlotsToday']), (None, None, 0))
 
 
 def event(method, bid='main', body=None, **path):
