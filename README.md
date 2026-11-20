@@ -113,7 +113,7 @@ aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL" --username 관리
 
 | 역할 | 판정 | 접근 가능 건물 | 관리(변경) | 운영 |
 |---|---|---|---|---|
-| `admin`(판매사 총관리자) | 액세스 토큰 `cognito:groups`에 `admin` 포함 | 전체(소속 없는 건물 포함) | 모든 기업·구성원·건물 정보, 기업 상태·코드, 건물 등록·트윈 확정 저장·삭제 | 전체 건물 |
+| `admin`(판매사 총관리자) | Cognito `admin` 그룹 구성원(서버가 그룹 조회, 60초 캐시, 지정·해제 후 3초 안 반영). 사용자 풀이 없는 로컬·테스트는 액세스 토큰 `cognito:groups` | 전체(소속 없는 건물 포함) | 모든 기업·구성원·건물 정보, 기업 상태·코드, 건물 등록·트윈 확정 저장·삭제 | 전체 건물 |
 | `manager`(고객사 관리자) | MembersTable 역할, 기업 코드로 처음 가입한 구성원 | 소속 기업 건물 | 없음(변경 API 403) | 조회 API 전체, AI 질의, 대화 기록 조회·삭제, 스케줄 저장·취소 |
 | `operator`(운영자) | MembersTable 역할, 두 번째 가입자부터 | 소속 기업 건물 | 없음(변경 API 403) | `manager`와 같음 |
 | 없음 | 구성원 항목 없음 | 없음(`GET /buildings`는 빈 목록, 그 밖의 건물 API는 403) | 없음 | 기업 코드 가입(`POST /me/join`)만 |
@@ -167,7 +167,8 @@ aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL" --username 관리
 | `POST /admin/companies/{id}/buildings` | `admin` | 본문 `{id?, name, use, hours, weekend, twin, rooms: [{id, name, floor, use, areaM2, idu}], plan: {floors: {층: {elevation?, bounds, rooms: [{id, polys, hvac}]}}}}` → 201 `{building: 건물 카드}`. `id`는 `b-` + 소문자·숫자 8자리(없으면 서버 생성, 형식 오류 400, 이미 있는 건물 409) |
 | `PATCH /admin/buildings/{id}` | `admin` | 본문 `{name, use, hours, weekend}` 일부 → `{building}`(건물 요약). 변경 이력 `building.update`의 `detail`은 `{before, after}` |
 | `DELETE /admin/buildings/{id}` | `admin` | 영구 삭제 → `{deleted: true}`. 변경 이력 `building.delete`는 이전 소속 기업 기준 |
-| `GET /admin/users` | `admin` | 가입한 사용자 이메일, 상태, 관리자 여부, 가입일 |
+| `GET /admin/users` | `admin` | 가입한 사용자 sub, 이메일, 상태, 판매사 관리자 여부, 소속 기업 이름, 가입일 |
+| `PUT /admin/users/{sub}/admin` | `admin` | `{admin}`(true 또는 false)로 판매사 관리자 지정·해제(Cognito `admin` 그룹 추가·제거). 자기 계정 해제는 409, 변경 이력은 기업 id `vendor`로 기록 |
 | `PATCH /admin/companies/{id}/members/{sub}` | `admin` | 본문 `{role: 'manager'·'operator'}` → `{member: {sub, email, role, joinedAt}}`. 다른 기업 구성원 404 |
 | `DELETE /admin/companies/{id}/members/{sub}` | `admin` | 소속 해제 → `{deleted: true}` |
 | `GET /admin/companies/{id}/audit?limit=` | `admin` | 고객사 변경 이력 API와 같은 응답 |
