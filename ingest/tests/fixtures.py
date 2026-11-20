@@ -35,7 +35,8 @@ def make_ifc(path, units=True):
         m = np.eye(4)
         m[:3, 3] = (x0, y0, z0)
         ifcopenshell.api.geometry.edit_object_placement(f, product=el, matrix=m)
-        prof = sb.polyline([(0, 0), (x1 - x0, 0), (x1 - x0, y1 - y0), (0, y1 - y0)], closed=True)
+        prof = sb.polyline([(0.0, 0.0), (float(x1 - x0), 0.0),
+                            (float(x1 - x0), float(y1 - y0)), (0.0, float(y1 - y0))], closed=True)
         rep = sb.get_representation(body, [sb.extrude(prof, h)])
         ifcopenshell.api.geometry.assign_representation(f, product=el, representation=rep)
 
@@ -97,7 +98,7 @@ def make_pdf(path, text=None):
     x = out.tell()
     out.write(b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs) + 1) + b''.join(b'%010d 00000 n \n' % o for o in offs))
     out.write(b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs) + 1, x))
-    open(path, 'wb').write(out.getvalue())
+    path.write_bytes(out.getvalue())
 
 
 class FakeS3:
@@ -107,7 +108,8 @@ class FakeS3:
         self.objects = dict(objects or {})
 
     def download_file(self, bucket, key, filename):
-        open(filename, 'wb').write(self.objects[key])
+        from pathlib import Path
+        Path(filename).write_bytes(self.objects[key])
 
     def put_object(self, Bucket, Key, Body, ContentType=None):
         self.objects[Key] = Body

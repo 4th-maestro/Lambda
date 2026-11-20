@@ -2,6 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Maestro 건물 운영 디지털트윈 API와 웹 호스팅
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
 Parameters:
   ModelId:
     Type: String
@@ -241,6 +245,10 @@ Resources:
   # - 판매사 건물 관리(admin.py): 트윈 테이블 Buildings·Rooms·Equipment·State 쓰기·삭제, 도면 버킷 plans/ 읽기·쓰기·삭제
   ApiFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Shared API includes plan confirmation using the existing building registration validation.
+        must: Plan confirmation requires the existing JWT authorizer and admin group; preserve existing routes and storage.
     Properties:
       Architectures: [arm64]
       Handler: api.handler
@@ -336,6 +344,7 @@ Resources:
         StartPlanJob: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/plans/jobs/{jobId}/start', Method: POST}}
         DetectPlan: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /plans/detect, Method: POST}}
         GetPlanJob: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/plans/jobs/{jobId}', Method: GET}}
+        ConfirmPlanJob: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: '/plans/jobs/{jobId}/confirm', Method: POST}}
 
   QueryFunction:
     Type: AWS::Serverless::Function

@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'src'))
 sys.modules.setdefault('anthropic', types.SimpleNamespace(AnthropicBedrock=lambda **kw: None))
 sys.modules.setdefault('boto3', types.SimpleNamespace(client=None))
 import api  # noqa: E402
+import admin  # noqa: E402
 import plan_ingest  # noqa: E402
 import tenant  # noqa: E402
 
@@ -252,6 +253,84 @@ class StatusTest(Base):
         out = self.get('d1')[1]
         self.assertEqual(out['draftUrl'], 'https://bk.s3/jobs/d1/draft.json?m=get_object')
         self.assertNotIn('pages', out)
+
+
+class ConfirmTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.jid = self.create({'building': 'b-abcd1234', 'kind': 'pdf', 'files': [{'name': 'a.pdf', 'size': 10}]})['jobId']
+        self.jobs.items[self.jid].update(status='review', step='merge')
+        self.request = {'operation': 'create', 'companyId': 'co-a', 'registration': {'name': '보정한 건물'}}
+
+    def confirm(self, body=None, groups='admin'):
+        return call('POST /plans/jobs/{jobId}/confirm', self.request if body is None else body,
+                    {'jobId': self.jid}, groups=groups)
+
+    def test_admin_only_and_missing_job(self):
+        self.assertEqual(self.confirm(groups='')[0], 403)
+        self.assertEqual(call('POST /plans/jobs/{jobId}/confirm', self.request, {'jobId': 'missing'})[0], 404)
+        self.assertEqual(self.jobs.items[self.jid]['status'], 'review')
+
+    def test_create_uses_existing_registration_and_replay_is_idempotent(self):
+        result = {'building': {'id': 'b-abcd1234', 'roomCount': 2}}
+        with patch.object(admin, 'handler', return_value={'statusCode': 201, 'body': json.dumps(result)}) as save:
+            code, receipt = self.confirm()
+            self.assertEqual((code, receipt['status'], receipt['building']), (200, 'done', result['building']))
+            forwarded = save.call_args[0][0]
+            self.assertEqual(forwarded['routeKey'], 'POST /admin/companies/{id}/buildings')
+            self.assertEqual(forwarded['pathParameters'], {'id': 'co-a'})
+            self.assertEqual(json.loads(forwarded['body'])['id'], 'b-abcd1234')
+            self.assertEqual(self.confirm(), (code, receipt))
+            save.assert_called_once()
+        job = self.jobs.items[self.jid]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(call('GET /plans/jobs/{jobId}', path={'jobId': self.jid})[1]['confirmation'], receipt)
+        self.assertEqual(self.confirm({**self.request, 'companyId': 'co-b'})[0], 409)
+
+    def test_replace_uses_existing_twin_validation_and_returns_version(self):
+        with patch.object(admin, 'twin', return_value={'statusCode': 200, 'body': json.dumps({'building': {'id': 'b-abcd1234'}, 'version': 3})}) as save:
+            code, receipt = self.confirm({'operation': 'replace', 'registration': {'twin': {}}})
+            self.assertEqual((code, receipt['version']), (200, 3))
+            self.assertEqual(save.call_args[0][0]['pathParameters'], {'id': 'b-abcd1234'})
+
+    def test_invalid_state_or_request_never_saves(self):
+        with patch.object(admin, 'handler') as save:
+            for status in ('created', 'running', 'failed', 'confirming'):
+                self.jobs.items[self.jid]['status'] = status
+                self.assertEqual(self.confirm()[0], 409)
+            self.jobs.items[self.jid]['status'] = 'review'
+            for body in ([], {'operation': 'erase'}, {'operation': 'create', 'registration': {}},
+                         {**self.request, 'registration': {'id': 'office'}},
+                         {**self.request, 'registration': {'number': float('nan')}}):
+                self.assertEqual(self.confirm(body)[0], 400, body)
+            self.jobs.items[self.jid]['kind'] = 'detect'
+            self.assertEqual(self.confirm()[0], 409)
+            save.assert_not_called()
+
+    def test_concurrent_confirm_never_registers_twice(self):
+        real = self.jobs.get_item
+        def read_then_race(Key):
+            item = real(Key)
+            self.jobs.items[self.jid]['status'] = 'confirming'
+            return item
+        self.jobs.get_item = read_then_race
+        with patch.object(admin, 'handler') as save:
+            self.assertEqual(self.confirm()[0], 409)
+            save.assert_not_called()
+
+    def test_validation_error_can_be_corrected(self):
+        result = {'statusCode': 400, 'body': json.dumps({'error': '호실 id 중복'})}
+        with patch.object(admin, 'handler', return_value=result):
+            self.assertEqual(self.confirm(), (400, {'error': '호실 id 중복'}))
+        self.assertEqual(self.jobs.items[self.jid]['status'], 'review')
+
+    def test_storage_failure_is_not_reported_as_done(self):
+        with patch.object(admin, 'handler', side_effect=RuntimeError('internal details')):
+            code, body = self.confirm()
+        self.assertEqual(code, 500)
+        self.assertNotIn('internal details', str(body))
+        self.assertEqual(self.jobs.items[self.jid]['status'], 'failed')
+        self.assertEqual(self.jobs.items[self.jid]['step'], 'confirm')
 
 
 class StateMachineTest(unittest.TestCase):
