@@ -11,11 +11,12 @@
 | `src/query.py` | `POST /query` 자연어 질의(Bedrock Claude Sonnet 5.5, 본문 `buildingId`), 응답에 단계 기록 `steps` 포함 |
 | `src/ws.py` | WebSocket `ask` 라우트(`buildingId`), 질의 단계 이벤트 실시간 전송([이벤트 형식](../docs/human/explanation/architecture.md#7-자연어-질의-llm-도구-호출과-서버-검증)) |
 | `src/schedules.py` | `GET /schedules?building=` 건물별 조회, `POST /schedules` 저장(`buildingId`의 호실만 허용), `DELETE /schedules/{id}` 취소 |
-| `src/recommend.py` | `GET /recommendations?building=&floor=` 낭비 규칙 3종 추천, 예상 절감량, 스케줄 초안 |
+| `src/recommend.py` | `GET /recommendations?building=&floor=` 낭비 규칙 3종 추천, 예상 절감량, 스케줄 초안, 사용 빈도 근거(`frequency`) |
+| `src/usage.py` | 호실 사용 빈도: 최근 4주 같은 요일·같은 시각 사용률·빈 채 운전률(추천 근거, 챗봇 `usage_frequency`) |
 | `src/anomalies.py` | `GET /anomalies?building=&floor=` 설정온도 미도달 HVAC 상세, 기대 온도, 원인 후보(규칙 기반 추정) |
 | `src/history.py` | `GET /rooms/history?building=&floor=` 층 전력 시간별 평균(kW)과 사용량(kWh), 오늘 0시~현재와 어제 0~23시 |
 | `src/energy.py` | `GET /energy/compare·trend·heatmap·breakdown` 건물별 전력 사용량 비교, 기간 추이, 요일×시간 평균 kW, 층·용도 구성([설계](../docs/human/explanation/architecture.md) 11절) |
-| `src/tools.py` | LLM 도구 6종(호실 순위, 묶음 합계, 기간 추이, 스케줄 초안, 기준 문서 검색, 쾌적 지표) 정의와 서버 검증(층·용도는 질의 건물 기준), 결과 그래프 정의(`chart`: 막대·선), 문서 근거(`sources`) 생성 |
+| `src/tools.py` | LLM 도구 9종(호실 순위, 묶음 합계, 기간 추이, 스케줄 초안, 자동 운영 조회·실행 초안, 사용 빈도, 기준 문서 검색, 쾌적 지표) 정의와 서버 검증(층·용도는 질의 건물 기준), 결과 그래프 정의(`chart`: 막대·선), 문서 근거(`sources`) 생성 |
 | `src/comfort.py` | 불쾌지수(기상청 식)와 단계, PMV·PPD(ISO 7730 반복 계산, 외부 패키지 없음) |
 | `src/plan_ingest.py`, `src/plan_confirm.py` | 도면 변환 작업 API(`/plans/*`, `admin` 그룹 전용): 업로드·시작·인식·상태 조회, 보정본 확정과 건물 등록 연결. 규칙은 아래 "도면 변환" 절 |
 | `src/detect.py`, `layers/pillow/` | 실내기·문 기호 인식 Lambda(타일 분할, Serverless Endpoint 호출, NMS는 실내기끼리와 문끼리 따로 적용)와 Pillow 계층 |
@@ -51,6 +52,41 @@ AWS_PROFILE=maestro python tools/eval_operations.py --out eval/operations-result
 ```
 
 2026-11-21 로컬 구현 검증: 단위 테스트 177개 중 175개 통과·2개 건너뜀, 실제 모델 도구 선택 평가 8/8 통과. cfn-lint는 오류·경고 0개입니다. cfn-guard 3.3.0과 AWS 공식 규칙 6개로 QueryFunction·WsFunction의 생성 IAM 역할을 검사해 위반 0개를 확인했습니다(스택 전체 보안 감사나 계정의 배포 검증은 아님). 프런트는 빌드와 일괄 실행 테스트 2개를 통과했습니다. 이 검증은 로컬 코드 기준이며 운영 배포·실제 제안 실행 확인은 별도입니다.
+
+## 외기 관측 표시
+
+`GET /rooms/status`의 `outdoorTemp`는 `WEATHER_TABLE`이 있으면 부산대 격자 `98,77`의
+최신 기상청 관측값(`tempC`)을 숫자로 반환합니다. `outdoorSource`는 `kma`,
+`outdoorObservedAt`은 관측 시각의 KST ISO 문자열입니다.
+
+Lambda 실행 환경마다 조회 결과를 5분 보관합니다. 빈 결과와 읽기 실패도 캐시하며,
+관측 시각이 요청 시점보다 2시간 넘게 오래됐으면 캐시 중에도 사용하지 않습니다.
+환경 변수 미설정, 빈 테이블, 읽기 실패, 잘못된 관측값에는 기존 시뮬레이션 외기를 반환하고
+`outdoorSource: "sim"`, `outdoorObservedAt: null`로 출처를 표시합니다.
+읽기 실패는 경고 로그로 남깁니다. 미래 시각의 관측도 사용하지 않습니다.
+
+`ApiFunction`만 `${TwinPrefix}-Weather`(기본 `maestro-Weather`) 환경 변수와
+`DynamoDBReadPolicy`를 갖습니다. 기존 `maestro-twin` 소유 테이블을 읽으며 생성·수정하지 않습니다.
+SDK 연결·읽기 제한은 각각 1초, 요청 시도는 1회입니다. 프런트는 기존 `outdoorTemp`를 그대로 사용하고,
+실내 온도·전력 계산에 쓰는 `sim.outdoor_temp()`는 기존 가상 곡선을 유지합니다.
+
+응답 예시입니다(실제 관측값이 아닌 형식 설명).
+
+```json
+{"outdoorTemp": 3.8, "outdoorSource": "kma", "outdoorObservedAt": "2026-11-20T19:00:00+09:00"}
+```
+
+이 변경만 별도로 배포하지 않습니다. `dev` 통합 후 승인된 `main` 배포에서 함께 반영하고,
+그 뒤 실제 `GET /rooms/status`와 Weather 최신 항목의 값·관측 시각을 대조하십시오.
+
+참고: [Boto3 Query](https://docs.aws.amazon.com/boto3/latest/reference/services/dynamodb/table/query.html),
+[SAM DynamoDBReadPolicy](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-policy-template-list.html#dynamodbreadpolicy).
+
+2026-11-21 로컬 검증(Python 3.12): 전체 테스트 201개 중 199개 통과,
+Pillow 미설치로 기존 테스트 2개 건너뜀입니다. 외기 테스트 10개와 실제 boto3의
+Stubber 기반 Query·Decimal 변환 검증을 통과했습니다. SAM lint와 추가 Weather 읽기 정책에서
+생성된 IAM 역할에 대한 AWS 공식 cfn-guard 규칙 6개를 통과했습니다.
+스택 전체 보안 감사, 계정의 배포 사전 검증, 배포 API 실측 대조는 수행하지 않았습니다.
 
 ## 테스트
 

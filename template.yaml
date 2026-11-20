@@ -266,6 +266,8 @@ Resources:
           PLANS_BUCKET: !Ref PlansBucket
           EQUIPMENT_TABLE: !Sub '${TwinPrefix}-Equipment'
           STATE_TABLE: !Sub '${TwinPrefix}-State'
+          # 표시용 외기만 관측값 참조. Weather는 maestro-twin 소유이며 읽기 전용.
+          WEATHER_TABLE: !Sub '${TwinPrefix}-Weather'
           PLAN_JOBS_TABLE: !Ref PlanJobsTable
           PLAN_STATE_MACHINE: !Ref PlanStateMachine
       Policies:
@@ -273,6 +275,7 @@ Resources:
         - DynamoDBCrudPolicy: {TableName: !Sub '${TwinPrefix}-Rooms'}
         - DynamoDBCrudPolicy: {TableName: !Sub '${TwinPrefix}-Equipment'}
         - DynamoDBCrudPolicy: {TableName: !Sub '${TwinPrefix}-State'}
+        - DynamoDBReadPolicy: {TableName: !Sub '${TwinPrefix}-Weather'}
         - DynamoDBCrudPolicy: {TableName: !Ref SchedulesTable}
         - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
         - DynamoDBCrudPolicy: {TableName: !Ref CompaniesTable}

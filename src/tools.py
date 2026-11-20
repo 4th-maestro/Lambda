@@ -5,6 +5,7 @@
 - create_schedule은 초안만 반환하고 저장은 운영자 확인 후 POST /schedules
 - search_documents: Bedrock Knowledge Base(KB_ID) Retrieve 상위 4개. 화면 근거 목록은 view['sources'](문서별 1건)
 - comfort_index: 불쾌지수(기상청 식)와 PMV·PPD(ISO 7730)를 comfort.py로 계산. 가정값은 결과 assumptions에 포함
+- usage_frequency: 최근 4주 같은 요일·같은 시각 사용률(usage.py). rooms는 호실 순위, hours는 시간대별 평균 사용률 + 건물 평소 전력(energy.heatmap)
 - 그래프: 각 도구가 결과 데이터로 화면용 그래프 정의(chart)를 만듦. 숫자는 항상 도구 결과에서 가져오고 LLM은 view로 표시 방식만 제안
   - bar: {kind, title, unit, items: [{label, sub, value, id?}]}, line: {kind, title, unit, labels, series: [{name, role, values}]}
   - prefer=table이면 화면이 표를 먼저 표시
@@ -19,6 +20,7 @@ import comfort
 import energy
 import operations
 import sim
+import usage
 
 METRICS = {'powerKw': '전력(kW)', 'temp': '실내온도(℃)', 'humidity': '습도(%)', 'setpoint': '설정온도(℃)'}
 # 묶음 합계 지표: (표시 이름, 단위, 계산)
@@ -28,6 +30,7 @@ AGG = {
     'anomaly': ('이상 감지', '건', lambda rs: sum(bool(s['anomaly']) for s in rs)),
     'temp': ('평균 실내온도', '℃', lambda rs: round(sum(s['temp'] for s in rs) / len(rs), 1)),
 }
+WEEKDAYS = '월화수목금토일'
 PERIODS = {'day': ('오늘', '어제', '시간별'), 'week': ('이번 주', '지난주', '일별'), 'month': ('이번 달', '지난달', '일별')}
 VIEW = {'type': 'string', 'enum': ['auto', 'chart', 'table'], 'description': '표시 방식 제안. 보통 auto, 사용자가 표를 원하면 table'}
 
@@ -132,6 +135,27 @@ def _definitions(version):
         },
     },
     {
+        'name': 'usage_frequency',
+        'description': ('최근 4주 같은 요일·같은 시각의 호실 사용 빈도(재실이 있던 주 수)와 빈 채 운전 빈도를 조회한다. 지금 상태가 아니라 평소 사용 패턴 질문에 사용한다. '
+                        'focus=rooms는 그 시각 호실별 사용률 순위("이 시간에 잘 안 쓰는 방", "금요일 오후에 자주 쓰는 회의실"), '
+                        'focus=hours는 대상 호실 평균의 시간대별 사용률과 건물 평소 전력("3층 회의실은 평소 언제 써?", "사람 많은 시간대")이다.'),
+        'strict': True,
+        'input_schema': {
+            'type': 'object', 'additionalProperties': False,
+            'required': ['floor', 'use', 'weekday', 'hour', 'focus', 'order', 'limit'],
+            'properties': {
+                'floor': {'type': 'string', 'enum': FLOORS + ['all']},
+                'use': {'type': 'string', 'enum': USES + ['all']},
+                'weekday': {'type': 'string', 'enum': ['today'] + list(WEEKDAYS), 'description': '요일을 말하지 않으면 today'},
+                'hour': {'type': 'integer', 'description': '0~23시. 시각을 말하지 않으면 -1(현재 시각)'},
+                'focus': {'type': 'string', 'enum': ['rooms', 'hours']},
+                'order': {'type': 'string', 'enum': ['asc', 'desc'], 'description': 'rooms일 때 asc=잘 안 쓰는 순, desc=자주 쓰는 순'},
+                'limit': {'type': 'integer', 'description': 'rooms일 때 1~20곳'},
+                'view': VIEW,
+            },
+        },
+    },
+    {
         'name': 'search_documents',
         'description': '냉난방 기준 온도, 공공기관 에너지 규정, 불쾌지수·PMV 같은 쾌적 지표의 정의와 단계, 설비·요금 기준 문서를 검색한다. 규정·기준·이론 질문에 사용하고 호실 수치 조회에는 쓰지 않는다.',
         'strict': True,
@@ -184,6 +208,12 @@ def chips(name, args):
         out += ['층별' if args.get('group_by') == 'floor' else '용도별', AGG.get(args.get('metric'), ('',))[0]]
     elif name == 'comfort_index':
         out += [f"불쾌지수 {'낮은' if args.get('order') == 'asc' else '높은'} 순", args.get('limit') and f"{args['limit']}곳"]
+    elif name == 'usage_frequency':
+        wd = args.get('weekday')
+        hour = args.get('hour')
+        out += ['최근 4주 사용 빈도', f'{wd}요일' if wd and wd != 'today' else '오늘 요일',
+                f'{hour}시' if args.get('focus') == 'rooms' and isinstance(hour, int) and hour >= 0 else None,
+                '시간대별' if args.get('focus') == 'hours' else ('잘 안 쓰는 순' if args.get('order') == 'asc' else '자주 쓰는 순')]
     elif name == 'list_operations':
         out += ['자동 운영 조회', args.get('status', 'pending')]
     elif name == 'operations_action':
@@ -215,6 +245,8 @@ def run(name, args, t, schedules, bid=None):
         raise ValueError(f"use는 {', '.join(uses)}, all 중 하나")
     if name in ('list_operations', 'operations_action'):
         return operations.run(name, args, t, buildings.get(bid)['id'])
+    if name == 'usage_frequency':
+        return _frequency(args, t, schedules, rooms, bid, view)
     if name == 'query_spaces':
         if args['metric'] not in METRICS or args['order'] not in ('desc', 'asc'):
             raise ValueError('metric 또는 order 값 오류')
@@ -348,6 +380,51 @@ def _effect(rooms, t, schedules, draft):
         before.append(round(sum(sim.state(r, ts, schedules)['powerKw'] for r in rooms), 1))
         after.append(round(sum(sim.state(r, ts, after_list)['powerKw'] for r in rooms), 1))
     return before, after
+
+
+FREQUENCY_BASIS = '최근 4주 같은 요일(오늘 제외), 시간마다 HH:30 표본, 재실 1명 이상이면 사용(가상 데이터)'
+
+
+def _frequency(args, t, schedules, rooms, bid, view):
+    """usage_frequency: 같은 요일 기준 사용 빈도. weekday는 오늘부터 거슬러 가장 가까운 그 요일"""
+    wd, hour, focus = args.get('weekday'), args.get('hour'), args.get('focus')
+    if wd not in ['today'] + list(WEEKDAYS) or focus not in ('rooms', 'hours') or args.get('order') not in ('asc', 'desc'):
+        raise ValueError('weekday(today, 월~일), focus(rooms, hours), order(asc, desc) 값 오류')
+    if type(hour) is not int or not -1 <= hour <= 23:
+        raise ValueError('hour는 0~23 정수, 현재 시각은 -1')
+    base = t if wd == 'today' else t - dt.timedelta(days=(t.weekday() - WEEKDAYS.index(wd)) % 7)
+    h = t.hour if hour == -1 else hour
+    targets = _pick(rooms, args['floor'], args['use'])
+    if not targets:
+        raise ValueError('대상 호실 없음')
+    profiles = [(r, usage.profile(r, base, schedules)) for r in targets]
+    day, weeks = WEEKDAYS[base.weekday()], usage.WEEKS
+    common_out = {'weekday': day, 'weeks': weeks, 'basis': FREQUENCY_BASIS, 'rooms': len(targets)}
+    if focus == 'hours':
+        rate = [round(sum(p['usageRate'][i] for _, p in profiles) / len(profiles), 2) for i in range(24)]
+        idle = [round(sum(p['idleOnRate'][i] for _, p in profiles) / len(profiles), 2) for i in range(24)]
+        kw = energy.heatmap({'building': bid}, t)['cells'][base.weekday()]
+        chart = _prefer(view, {
+            'kind': 'line', 'title': f"{_where(args)} {day}요일 시간대별 평균 사용률(최근 {weeks}주)", 'unit': '%', 'labels': [f'{i}시' for i in range(24)],
+            'series': [{'name': '사용률', 'role': 'current', 'values': [round(v * 100) for v in rate]},
+                       {'name': '빈 채 운전률', 'role': 'previous', 'values': [round(v * 100) for v in idle]}],
+            'note': f"대상 {len(targets)}곳, 가장 자주 쓰는 시간 " + (', '.join(f'{x}시' for x in usage.peak_hours(rate)) or '없음'),
+        })
+        return ({**common_out, 'usageRate': rate, 'idleOnRate': idle, 'peakHours': usage.peak_hours(rate), 'busyHours': usage.busy_hours(rate),
+                 'buildingAvgKw': kw, 'buildingAvgKwBasis': f'건물 전체 {day}요일 시간별 평균 전력(kW, 최근 4주, 히트맵과 같은 값)'},
+                {'chart': chart})
+    limit = min(20, max(1, int(args['limit'])))
+    rows = [{'id': r['id'], 'name': r['name'], 'floor': r['floor'], 'use': r['use'],
+             'usedWeeks': p['usedWeeks'][h], 'usageRate': p['usageRate'][h], 'idleOnWeeks': p['idleOnWeeks'][h],
+             'busyHours': usage.busy_hours(p['usageRate'])} for r, p in profiles]
+    rows.sort(key=lambda x: (x['usageRate'] if args['order'] == 'asc' else -x['usageRate'], -x['idleOnWeeks'], x['floor'], x['name']))
+    rows = rows[:limit]
+    chart = _prefer(view, {
+        'kind': 'bar', 'title': f"{_where(args)} {day}요일 {h}시대 사용률 {'낮은' if args['order'] == 'asc' else '높은'} 순 {len(rows)}곳(최근 {weeks}주)", 'unit': '%',
+        'items': [{'id': x['id'], 'label': x['name'], 'sub': f"{x['floor']}, {x['use']}, {x['usedWeeks']}/{weeks}회", 'value': round(x['usageRate'] * 100)} for x in rows],
+    })
+    return ({**common_out, 'hour': h, 'items': [{k: v for k, v in x.items() if k != 'id'} for x in rows]},
+            {'highlight': [x['id'] for x in rows], 'chart': chart})
 
 
 def _trend(args, t, bid, view):
