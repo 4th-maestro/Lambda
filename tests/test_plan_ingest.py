@@ -7,6 +7,7 @@ import sys
 import time
 import types
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'src'))
@@ -292,6 +293,17 @@ class ConfirmTest(Base):
             code, receipt = self.confirm({'operation': 'replace', 'registration': {'twin': {}}})
             self.assertEqual((code, receipt['version']), (200, 3))
             self.assertEqual(save.call_args[0][0]['pathParameters'], {'id': 'b-abcd1234'})
+
+    def test_dynamodb_receipt_numbers_remain_numbers_on_replay_and_status(self):
+        saved = {'building': {'id': 'b-abcd1234', 'roomCount': 2, 'hours': [9, 18]}}
+        with patch.object(admin, 'handler', return_value={'statusCode': 201, 'body': json.dumps(saved)}):
+            original = self.confirm()
+        stored = {**self.jobs.items[self.jid], 'confirmation': {'status': 'done', 'building': {
+            'id': 'b-abcd1234', 'roomCount': Decimal(2), 'hours': [Decimal(9), Decimal(18)]}}}
+        with patch.object(plan_ingest, '_job', return_value=stored):
+            self.assertEqual(self.confirm(), original)
+            status = call('GET /plans/jobs/{jobId}', path={'jobId': self.jid})[1]
+            self.assertEqual(status['confirmation'], original[1])
 
     def test_invalid_state_or_request_never_saves(self):
         with patch.object(admin, 'handler') as save:

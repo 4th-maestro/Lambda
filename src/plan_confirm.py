@@ -4,6 +4,7 @@ import hashlib
 import json
 
 import admin
+import buildings
 import common
 import tenant
 
@@ -30,7 +31,7 @@ def confirm(event, job, put):
         return common.resp(400, {'error': '요청 본문에 유효하지 않은 숫자나 중첩이 있습니다.'})
     if job['status'] == 'done':
         if job.get('confirmationHash') == fingerprint:
-            return common.resp(200, job['confirmation'])
+            return common.resp(200, buildings._plain(job['confirmation']))
         return common.resp(409, {'error': '이미 다른 보정본으로 확정한 작업입니다.'})
     if job['kind'] == 'detect' or job['status'] != 'review':
         return common.resp(409, {'error': '보정 대기(review) 상태의 도면 변환 작업만 확정할 수 있습니다.'})

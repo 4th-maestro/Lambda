@@ -186,7 +186,7 @@ def status(event):
     if job.get('error'):
         out['error'] = _message(job['error'])
     if job.get('confirmation'):
-        out.update(confirmation=job['confirmation'], confirmedAt=job['confirmedAt'])
+        out.update(confirmation=buildings._plain(job['confirmation']), confirmedAt=job['confirmedAt'])
     if job.get('draftKey'):
         out['draftUrl'] = _url('get_object', job['draftKey'])
     if job.get('draftKey') and job['kind'] != 'detect':
