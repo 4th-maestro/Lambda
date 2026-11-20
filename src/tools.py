@@ -3,6 +3,7 @@
 - LLM은 도구 이름과 인자만 생성, 층·용도·동작은 아래 목록 값만 허용
 - 층·용도 enum: 전체 건물의 합집합(도구 정의 1개 유지), 질의 건물에 없는 값은 run에서 거부
 - create_schedule은 초안만 반환하고 저장은 운영자 확인 후 POST /schedules
+  - 대상: rooms(호실 이름)가 있으면 이름 선택(pick=rooms, use 무시), 없으면 층·용도 선택(pick=group)
 - search_documents: Bedrock Knowledge Base(KB_ID) Retrieve 상위 4개. 화면 근거 목록은 view['sources'](문서별 1건)
 - comfort_index: 불쾌지수(기상청 식)와 PMV·PPD(ISO 7730)를 comfort.py로 계산. 가정값은 결과 assumptions에 포함
 - usage_frequency: 최근 4주 같은 요일·같은 시각 사용률(usage.py). rooms는 호실 순위, hours는 시간대별 평균 사용률 + 건물 평소 전력(energy.heatmap)
@@ -88,14 +89,16 @@ def _definitions(version):
     },
     {
         'name': 'create_schedule',
-        'description': '층·용도로 대상 호실을 골라 냉난방 제어 스케줄 초안을 만든다. condition=unused는 그 시각 이후 재실이 없을 때만 적용한다.',
+        'description': '층·용도 또는 호실 이름으로 대상 호실을 골라 냉난방 제어 스케줄 초안을 만든다. condition=unused는 그 시각 이후 재실이 없을 때만 적용한다.',
         'strict': True,
         'input_schema': {
             'type': 'object', 'additionalProperties': False,
-            'required': ['floor', 'use', 'action', 'time', 'condition', 'setpoint'],
+            'required': ['floor', 'use', 'rooms', 'action', 'time', 'condition', 'setpoint'],
             'properties': {
                 'floor': {'type': 'string', 'enum': FLOORS + ['all']},
                 'use': {'type': 'string', 'enum': USES + ['all']},
+                'rooms': {'type': 'array', 'items': {'type': 'string'},
+                          'description': '사용자가 말한 호실 이름(예: 회의실 A, 101호). 이름으로 고르면 use는 무시, 층·용도로 고르면 빈 배열'},
                 'action': {'type': 'string', 'enum': ['off', 'on', 'setpoint']},
                 'time': {'type': 'string', 'description': '24시간 형식 HH:MM'},
                 'condition': {'type': 'string', 'enum': ['unused', 'always']},
@@ -219,6 +222,8 @@ def chips(name, args):
     elif name == 'operations_action':
         out += ['자동 운영 초안', {'accept': '수락', 'reject': '거절', 'undo': '되돌리기'}.get(args.get('action'))]
     elif name == 'create_schedule':
+        if isinstance(args.get('rooms'), list) and args['rooms']:
+            out[1] = _names([str(n) for n in args['rooms']])
         action = {'off': '운전 OFF', 'on': '운전 ON'}.get(args.get('action')) or f"설정온도 {args.get('setpoint', 0):g}℃"
         out += [args.get('time') and f"{args['time']} 이후", '재실 없을 때' if args.get('condition') == 'unused' else None, action]
     return [c for c in out if c]
@@ -226,6 +231,33 @@ def chips(name, args):
 
 def _pick(rooms, floor, use):
     return [r for r in rooms if floor in ('all', r['floor']) and use in ('all', r['use'])]
+
+
+def _norm(s):
+    return re.sub(r'\s+', '', str(s)).lower()
+
+
+def _names(names, n=3):
+    return ', '.join(names[:n]) + (f' 외 {len(names) - n}곳' if len(names) > n else '')
+
+
+def _pick_names(rooms, floor, names):
+    """호실 이름 선택: 공백·대소문자 무시 완전 일치(이름 또는 id) 우선, 없으면 포함 일치 1곳. 못 찾거나 여러 곳이면 ValueError(후보 이름 포함)"""
+    pool = _pick(rooms, floor, 'all')
+    picked, bad, near = {}, [], []
+    for q in names:
+        key = _norm(q)
+        hits = [r for r in pool if key in (_norm(r['name']), _norm(r['id']))] or [r for r in pool if key and key in _norm(r['name'])]
+        if hits and (len(hits) == 1 or _norm(hits[0]['name']) == key):
+            picked.update((r['id'], r) for r in hits)
+        else:
+            bad.append(q)
+            near += [r['name'] for r in hits]
+    if bad:
+        where = '' if floor == 'all' else f'{floor} '
+        cand = list(dict.fromkeys(near or [r['name'] for r in pool]))[:10]
+        raise ValueError(f"{where}호실 이름 확인 필요: {', '.join(bad)}(없거나 여러 곳). 후보: {', '.join(cand) or '없음'}")
+    return list(picked.values())
 
 
 def run(name, args, t, schedules, bid=None):
@@ -298,12 +330,18 @@ def run(name, args, t, schedules, bid=None):
             raise ValueError('time은 HH:MM 형식')
         if args['action'] == 'setpoint' and not 16 <= args['setpoint'] <= 30:
             raise ValueError('setpoint는 16~30')
-        targets = _pick(rooms, args['floor'], args['use'])
+        if not isinstance(args.get('rooms', []), list):
+            raise ValueError('rooms는 호실 이름 배열')
+        names = [str(n) for n in args.get('rooms') or [] if str(n).strip()]
+        targets = _pick_names(rooms, args['floor'], names) if names else _pick(rooms, args['floor'], args['use'])
         if not targets:
             raise ValueError('대상 호실 없음')
+        floors_hit = {r['floor'] for r in targets}
         draft = {
             'roomIds': [r['id'] for r in targets], 'roomNames': [r['name'] for r in targets][:10],
-            'floor': args['floor'], 'use': args['use'], 'action': args['action'], 'time': args['time'],
+            'floor': (floors_hit.pop() if len(floors_hit) == 1 else 'all') if names else args['floor'],
+            'use': 'all' if names else args['use'], 'pick': 'rooms' if names else 'group',
+            'action': args['action'], 'time': args['time'],
             'condition': args['condition'], 'setpoint': args['setpoint'] if args['action'] == 'setpoint' else None,
         }
         before, after = _effect(targets, t, schedules, draft)
