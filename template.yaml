@@ -27,6 +27,18 @@ Parameters:
     Type: String
     # 트윈 테이블: maestro-twin 스택(infra/twin/template.yaml)의 <Prefix>-Buildings, -Rooms, -Equipment, -State. 이름으로만 참조
     Default: maestro
+  # 운전 시뮬레이션 계산 서버(maestro-sim 스택, infra/sim): 웹 /api/sim/* → Function URL
+  # - 값은 maestro-sim 출력 SimOriginDomain(예 abc.lambda-url.ap-northeast-2.on.aws). 비어 있으면 CloudFront 경로를 만들지 않음
+  SimOriginDomain:
+    Type: String
+    Default: ''
+  # CloudFront → 계산 서버 비밀 헤더 값(Secrets Manager 문자열). maestro-sim과 같은 이름
+  SimSecretName:
+    Type: String
+    Default: maestro/sim-origin-secret
+
+Conditions:
+  HasSim: !Not [!Equals [!Ref SimOriginDomain, '']]
 
 Globals:
   Function:
@@ -702,6 +714,27 @@ Resources:
             DomainName: !GetAtt WebBucket.RegionalDomainName
             OriginAccessControlId: !Ref WebOac
             S3OriginConfig: {OriginAccessIdentity: ''}
+          - !If
+            - HasSim
+            - Id: sim
+              DomainName: !Ref SimOriginDomain
+              # EnergyPlus 2회 실행 13~19초(2026-11-21 컨테이너 실측) + 첫 호출 이미지 적재
+              CustomOriginConfig: {OriginProtocolPolicy: https-only, OriginSSLProtocols: [TLSv1.2], OriginReadTimeout: 60}
+              OriginCustomHeaders:
+                - HeaderName: x-maestro-sim
+                  HeaderValue: !Sub '{{resolve:secretsmanager:${SimSecretName}}}'
+            - !Ref AWS::NoValue
+        CacheBehaviors: !If
+          - HasSim
+          - - PathPattern: /api/sim/*
+              TargetOriginId: sim
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+              CachedMethods: [GET, HEAD]
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # Managed-CachingDisabled
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # Managed-AllViewerExceptHostHeader(Function URL은 자기 Host만 허용)
+              Compress: true
+          - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: web
           ViewerProtocolPolicy: redirect-to-https

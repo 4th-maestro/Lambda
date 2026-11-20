@@ -13,6 +13,7 @@
 | `src/schedules.py` | `GET /schedules?building=` 건물별 조회, `POST /schedules` 저장(`buildingId`의 호실만 허용), `DELETE /schedules/{id}` 취소 |
 | `src/recommend.py` | `GET /recommendations?building=&floor=` 낭비 규칙 3종 추천, 예상 절감량, 스케줄 초안, 사용 빈도 근거(`frequency`) |
 | `src/usage.py` | 호실 사용 빈도: 최근 4주 같은 요일·같은 시각 사용률·빈 채 운전률(추천 근거, 챗봇 `usage_frequency`) |
+| `infra/sim/` | 운전 시뮬레이션 계산 서버(EnergyPlus 컨테이너 Lambda, 스택 `maestro-sim`, 웹 `/api/sim/*`) |
 | `src/anomalies.py` | `GET /anomalies?building=&floor=` 설정온도 미도달 HVAC 상세, 기대 온도, 원인 후보(규칙 기반 추정) |
 | `src/history.py` | `GET /rooms/history?building=&floor=` 층 전력 시간별 평균(kW)과 사용량(kWh), 오늘 0시~현재와 어제 0~23시 |
 | `src/energy.py` | `GET /energy/compare·trend·heatmap·breakdown` 건물별 전력 사용량 비교, 기간 추이, 요일×시간 평균 kW, 층·용도 구성([설계](../docs/human/explanation/architecture.md) 11절) |
@@ -115,9 +116,13 @@ sam build && sam deploy --guided --profile maestro
 git switch main && git pull --ff-only \
   && test -z "$(git status --porcelain --untracked-files=no)" \
   && sam build \
+  && SIM=$(aws cloudformation describe-stacks --stack-name maestro-sim --region ap-northeast-2 --profile maestro \
+       --query "Stacks[0].Outputs[?OutputKey=='SimOriginDomain'].OutputValue" --output text 2>/dev/null || true) \
   && sam deploy --stack-name maestro --region ap-northeast-2 --profile maestro --capabilities CAPABILITY_IAM --resolve-s3 --resolve-image-repos \
-     --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides ModelId=global.anthropic.claude-sonnet-5-5
+     --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides ModelId=global.anthropic.claude-sonnet-5-5 "SimOriginDomain=${SIM:-}"
 ```
+
+`SimOriginDomain`은 운전 시뮬레이션 계산 서버(`maestro-sim`, [infra/sim/README.md](infra/sim/README.md))의 Function URL 주소입니다. 빼고 배포하면 웹의 `/api/sim/*` 경로가 사라져 **EnergyPlus로 계산** 버튼이 동작하지 않습니다. `maestro-sim` 스택이 없으면 빈 값으로 경로 없이 배포됩니다.
 
 주: 2026-11-20 작업 사본의 미커밋 변경 때문에 브랜치 전환이 실패한 상태에서 `sam build`가 이어 실행되어, 머지 전 코드가 약 3분간 배포되었습니다. 명령을 `&&`로 연결하고 브랜치·변경 확인을 앞에 둔 이유입니다.
 
