@@ -1,11 +1,13 @@
 """도면 변환 handler 테스트(cd ingest && python -m unittest discover tests)"""
 import json
+import io
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import app  # noqa: E402
@@ -28,6 +30,48 @@ def run(s3, kind, names, **extra):
     out = app.handler({'op': 'parse', 'jobId': 'j', 'building': 'b-test0001', 'kind': kind, 'bucket': 'bk',
                        'keys': [f'uploads/j/{n}' for n in names], **extra}, None)
     return out, json.loads(s3.objects[out['draftKey']])
+
+
+class ImageTest(unittest.TestCase):
+    def test_transparent_background_is_composited_onto_white(self):
+        image = Image.new('RGBA', (10, 10), (0, 0, 0, 0))
+        image.putpixel((0, 0), (0, 0, 0, 255))
+        image.save(TMP / 'transparent.png')
+        source = upload(TMP / 'transparent.png')
+        out, _ = run(source, 'image', ['transparent.png'])
+        with Image.open(io.BytesIO(source.objects[out['detect'][0]['imageKey']])) as normalized:
+            self.assertEqual(normalized.getpixel((0, 0)), (0, 0, 0))
+            self.assertEqual(normalized.getpixel((5, 5)), (255, 255, 255))
+
+    def test_images_become_review_backgrounds_and_detection_inputs(self):
+        Image.new('RGB', (40, 30), 'white').save(TMP / '1층.png')
+        Image.new('RGB', (60, 20), 'white').save(TMP / '2층.jpg')
+        out, draft = run(upload(TMP / '1층.png', TMP / '2층.jpg'), 'image',
+                         ['1층.png', '2층.jpg'], options={'pxPerM': 40})
+        self.assertEqual(draft['meta']['ingest']['kind'], 'image')
+        self.assertEqual([x['id'] for x in draft['floors']], ['1F', '2F'])
+        self.assertEqual([(x['pxPerM'], x['toPlan']) for x in out['detect']], [(40, None), (40, None)])
+        self.assertEqual(draft['floors'][0]['background']['px'], [40, 30])
+        self.assertEqual(draft['floors'][1]['background']['px'], [60, 20])
+
+    def test_exif_rotation_is_materialized_before_detection(self):
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new('RGB', (40, 30), 'white').save(TMP / 'rotate.jpg', exif=exif)
+        source = upload(TMP / 'rotate.jpg')
+        out, draft = run(source, 'image', ['rotate.jpg'])
+        self.assertEqual(draft['floors'][0]['background']['px'], [30, 40])
+        self.assertIsNone(out['detect'][0]['pxPerM'])
+        self.assertTrue(draft['meta']['ingest']['warnings'])
+
+    def test_size_limit_and_wrong_format_fail_before_draft_is_saved(self):
+        Image.new('RGB', (40, 30)).save(TMP / 'small.png')
+        with patch.object(common, 'MAX_PX', 100):
+            with self.assertRaisesRegex(ValueError, '6,400만'):
+                run(upload(TMP / 'small.png'), 'image', ['small.png'])
+        (TMP / 'bad.png').write_bytes(b'not an image')
+        with self.assertRaises(Exception):
+            run(upload(TMP / 'bad.png'), 'image', ['bad.png'])
 
 
 class IfcTest(unittest.TestCase):

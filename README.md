@@ -17,7 +17,7 @@
 | `src/energy.py` | `GET /energy/compare·trend·heatmap·breakdown` 건물별 전력 사용량 비교, 기간 추이, 요일×시간 평균 kW, 층·용도 구성([설계](../docs/human/explanation/architecture.md) 11절) |
 | `src/tools.py` | LLM 도구 6종(호실 순위, 묶음 합계, 기간 추이, 스케줄 초안, 기준 문서 검색, 쾌적 지표) 정의와 서버 검증(층·용도는 질의 건물 기준), 결과 그래프 정의(`chart`: 막대·선), 문서 근거(`sources`) 생성 |
 | `src/comfort.py` | 불쾌지수(기상청 식)와 단계, PMV·PPD(ISO 7730 반복 계산, 외부 패키지 없음) |
-| `src/plan_ingest.py` | 도면 변환 작업 API(`/plans/*`, `admin` 그룹 전용): 작업 생성과 업로드 URL, 시작, 인식 전용 작업, 상태 조회. 규칙은 아래 "도면 변환" 절 |
+| `src/plan_ingest.py`, `src/plan_confirm.py` | 도면 변환 작업 API(`/plans/*`, `admin` 그룹 전용): 업로드·시작·인식·상태 조회, 보정본 확정과 건물 등록 연결. 규칙은 아래 "도면 변환" 절 |
 | `src/detect.py`, `layers/pillow/` | 실내기 기호 인식 Lambda(타일 분할, Serverless Endpoint 호출, NMS)와 Pillow 계층 |
 | `statemachine/plan.asl.json` | 도면 변환 상태 머신(JSONata): Parse, Detect, Merge, SaveDraft, 실패 기록 |
 | `ingest/` | 도면 파서 컨테이너 Lambda(`Dockerfile`, `app.handler`), 브랜치 `feat/plan-parsers` |
@@ -183,7 +183,7 @@ python3 tools/migrate_tenancy.py --user-pool-id "$POOL" --profile maestro
 
 | 항목 | 방식 |
 |---|---|
-| 함수 구성 | 조회·관리 API 44개 경로를 `api.py` 함수 1개로 처리. 이전 9개 함수는 화면마다 콜드 스타트가 9번 발생(첫 호출 2.6~2.9초, 2026-11-20 실측) |
+| 함수 구성 | 조회·관리 API 45개 경로를 `api.py` 함수 1개로 처리. 이전 9개 함수는 화면마다 콜드 스타트가 9번 발생(첫 호출 2.6~2.9초, 2026-11-20 실측) |
 | 메모리 | 전체 기본 1024MB, API 함수 1769MB(vCPU 1개). 512MB에서 `/buildings` p50 4.0초 |
 | 캐시 | 지난 시간·지난 날짜 계산은 대상 스케줄을 키로 실행 환경 메모리에 보관(스케줄 변경 시 자동 재계산), `/buildings` 응답은 30초 |
 
@@ -207,11 +207,34 @@ python3 tools/migrate_tenancy.py --user-pool-id "$POOL" --profile maestro
 | 파일 검사 | 작업당 1~20개, 이름 1~200자(`/`, `\` 불가, 중복 불가), 크기 1바이트~200MB. 위반은 400 |
 | 업로드 | 키 `uploads/<jobId>/<파일 이름>`. PUT URL 서명에 `Content-Length` 포함, 신고 크기와 다른 파일은 S3가 거부 |
 | 시작 옵션 | `scale`(축척 분모, 예 200), `pxPerM`(1m당 픽셀) 양수만 허용, 파서에 그대로 전달 |
-| 상태 | `created` → `running`(시작) → `review`(초안 완료) 또는 `failed`. `failed`는 다시 시작 가능, 동시 시작은 조건부 기록으로 1건만 허용 |
+| 상태 | `created` → `running` → `review`(사람 보정 대기) → `confirming` → `done`. 변환·확정 저장 실패는 `failed`. 동시 시작·확정은 조건부 기록으로 1건만 허용 |
 | 단계 | `parse`(시작 시 API 기록) → `detect` → `merge`(상태 머신 기록). 인식 전용 작업은 `detect`만 사용 |
 | 인식 전용 작업 | `key`는 같은 건물 작업으로 올린 이미지만 허용. 결과는 `jobs/<jobId>/draft.json` `{floor: null, detections, model}`, `pages` 없음 |
 | 오류 | 상태 머신이 `error`에 오류 원문 기록. Lambda 오류는 `errorMessage`만 응답 |
-| 확정 저장 | 이 API 범위 밖. 판매사 건물 관리 `PUT /buildings/{id}/twin`(브랜치 `feat/vendor-buildings`, 응답 `{building, version}`) |
+| 확정 저장 | `POST /plans/jobs/{jobId}/confirm`이 기존 판매사 등록·트윈 교체 검증을 재사용해 저장하고 작업을 `done`으로 갱신. 기존 직접 저장 경로도 유지 |
+
+### 보정본 확정 API
+
+`POST /plans/jobs/{jobId}/confirm`은 `admin` 전용이며 요청은
+`{operation: 'create'·'replace', companyId?: 기업 id, registration: 보정한 등록 본문}`입니다.
+성공 응답은 200 `{status: 'done', building, version?}`입니다.
+
+- 신규 건물은 `operation: 'create'`, `companyId`, `registration: {name, use, hours, weekend, twin, rooms, plan}`을 보냅니다.
+  건물 id는 도면 작업의 `building`으로 고정됩니다. 다른 id를 보내면 400입니다.
+- 기존 건물은 `operation: 'replace'`, `registration: {twin, rooms, plan}`을 보냅니다.
+  기존 등록 API의 기업·호실·면적·층·권한 검사와 S3·DynamoDB 저장을 그대로 사용합니다.
+- `review` 상태의 변환 작업만 확정할 수 있습니다. 인식 전용 작업은 대상이 아닙니다.
+  같은 보정본 재전송은 캐시된 결과를 반환해 건물·버전을 다시 만들지 않습니다.
+  동시 확정 또는 완료 후 다른 보정본은 409입니다. 상태 조회에 `confirmation`, `confirmedAt`이 추가됩니다.
+- 입력 오류는 `review`로 돌아갑니다. 저장 예외는 `failed`/`step: confirm`으로 기록합니다.
+  기존 등록 처리는 S3·복수 테이블에 순차 기록하므로 중간 장애 때 부분 저장될 수 있습니다.
+  이때 건물·소속·도면을 확인해 복구해야 합니다. 강제 종료로 `confirming`에 남은 작업도 운영자 확인이 필요합니다.
+
+Step Functions는 초안 생성까지 실행되고, 사람 대기는 DynamoDB의 `review` 상태로 관리합니다(보관 7일).
+별도 목업 스택·장기 대기 태스크 토큰은 추가하지 않습니다. 3D 결과는 기존 렌더러의
+`twin.building/v1`·도면 JSON이며 IFC·glb 내보내기는 범위 밖입니다.
+프런트는 기존 직접 저장 대신 이 `/confirm` 경로를 호출하면 작업 완료까지 연결할 수 있습니다.
+기존 직접 저장은 작업 상태를 변경하지 않습니다. 이 변경에는 프런트 화면 수정이 포함되지 않습니다.
 
 | S3 키(도면 버킷) | 쓰는 곳 | 보관 |
 |---|---|---|

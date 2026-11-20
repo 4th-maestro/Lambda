@@ -2,17 +2,17 @@
 
 > **요약** (기준일 2026-11-20)
 >
-> - 운영자가 올린 IFC, DXF·DWG, PDF를 `twin.building/v1` 초안으로 변환하는 컨테이너 Lambda입니다. 진입점은 `app.handler`이고, `op`는 `parse`와 `merge` 2종입니다.
+> - 운영자가 올린 IFC, DXF·DWG, PDF, PNG·JPG를 `twin.building/v1` 초안으로 변환하는 컨테이너 Lambda입니다. 진입점은 `app.handler`이고, `op`는 `parse`와 `merge` 2종입니다.
 > - 실내기는 IFC 객체와 CAD 블록에서 우선 읽습니다. 실내기가 없는 층은 도면 이미지를 저장하고 `detect` 목록으로 인식 대상을 반환합니다.
 > - 변환 규약의 원본은 [도면 변환 규약](../../docs/human/reference/plan-ingest.md)입니다. 이 문서는 handler 입출력과 빌드·테스트 절차를 다룹니다.
 >
 > | 항목 | 값 | 비교 기준 |
 > |---|---|---|
-> | 테스트 | 13개(통과 12, DWG 1개 건너뜀) | libredwg 없는 개발 PC 기준 |
+> | 테스트 | 17개(통과 15, DWG 환경 검사 2개 건너뜀) | 실제 Lambda x86_64 이미지, `dwg2dxf` 포함·`dxf2dwg` 미포함 |
 > | 공개 IFC 2개 파일(2.4MB, 17.9MB) | 0.3초(개발 PC), 호실 21개 | 의원 건물 추출 실험 약 10초(호실 269개) |
 > | 도면 이미지 1장 | 최대 6,400만 화소 | 인식 축척 1m당 80px |
 >
-> **다음 작업**: Docker 이미지 빌드 확인, 실제 DWG·DXF 도면 검증(5절)
+> **다음 작업**: 실제 DWG·DXF 도면 검증(5절)
 
 ## 1. handler 계약: parse와 merge 2종
 
@@ -23,7 +23,7 @@
 | 구분 | 필드 | 형식 |
 |---|---|---|
 | 요청 | `op`, `jobId`, `building`, `bucket` | `"parse"`, 문자열 |
-| 요청 | `kind` | `ifc`, `cad`, `pdf` |
+| 요청 | `kind` | `ifc`, `cad`, `pdf`, `image` |
 | 요청 | `keys` | 업로드 S3 키 목록 |
 | 요청 | `options` | `{scale?: 정수, pxPerM?: 숫자}`, 선택 |
 | 응답 | `draftKey` | `jobs/<jobId>/draft.json` |
@@ -93,11 +93,19 @@
 - 층 ID는 쪽 문자의 층 표기(`1층`, `일층`, `지하1층`, `1F`) 중 가장 많은 값입니다. 없거나 겹치면 `P<쪽 번호>`입니다.
 - PDF 호실은 만들지 않습니다. 트윈 파이프라인 평면도 단계가 쪽 이미지로 호실을 만듭니다.
 
+**2-4. PNG·JPG는 EXIF 회전을 적용한 RGB PNG를 `jobs/<작업>/pages/`에 저장합니다.**
+파일 이름의 층 표기를 사용하고 없거나 겹치면 `P<번호>`를 사용합니다. 최대 6,400만 화소이며
+실제 PNG·JPEG가 아니면 실패합니다. `options.pxPerM`을 인식 입력에 전달하고, 축척이 없으면
+경고를 남깁니다. PDF와 마찬가지로 호실은 보정 단계에서 만듭니다.
+
 ## 3. 빌드와 배포 설정: 컨테이너 이미지 1개
 
 **3-1. 이미지는 2단계로 빌드합니다. 1단계에서 libredwg 0.13.3을 정적 빌드하고, 2단계에서 `dwg2dxf`와 파이썬 의존성을 설치합니다.**
 
 이미지는 x86_64로 빌드합니다. ifcopenshell 0.9.0.post1 휠은 태그가 `manylinux_2_31`이지만, aarch64 바이너리는 실제로 GLIBC 2.38을 요구합니다. 그래서 Lambda python:3.12 이미지(GLIBC 2.34)에서 import가 실패했습니다(2026-11-20 배포 후 확인). x86_64 바이너리는 GLIBC 2.34를 요구해 실행됩니다. libredwg는 휠이 아닌 C 소스 빌드입니다.
+
+Dockerfile은 의존성 설치 후 네이티브 모듈을 import해 호환성 오류를 빌드 단계에서 검출합니다.
+IFC 파서는 소유 SWIG 형상 객체를 유지한 상태로 정점·면 버퍼를 복사해 형상 누락을 방지합니다.
 
 ```bash
 cd ingest
@@ -133,6 +141,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt boto3 nump
 | `IfcTest` | 층 1개·호실 2개, 별칭 일치 카세트, 치수 판정 스탠드형·벽걸이형, 디퓨저 제외, y축 반전, 설비도면 층 배정 |
 | `CadTest` | 문 개구부가 있는 내벽 분할, 실 이름·번호, 블록 이름·속성 일치, 벽 레이어 없는 도면과 도면 틀 제외, 렌더링과 `toPlan`, 병합 좌표·호실·재병합 |
 | `PdfTest` | 축척 문자와 층 표기, A4 1/200 렌더링 크기(4,753×3,359px), 위치 미맞춤 인식 결과 저장 |
+| `ImageTest` | PNG·JPG 입력·층 배정·축척 전달, EXIF 회전 반영, 잘못된 이미지·화소 상한 거부 |
 | `RuleTest` | 축척 문자, 층 표기, 별칭 판정, 화소 상한 |
 
 주: DWG 변환 테스트는 `dwg2dxf`와 `dxf2dwg`가 있는 환경(컨테이너 이미지)에서만 실행합니다.
@@ -156,6 +165,6 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt boto3 nump
 
 | 작업 | 기한 | 담당 |
 |---|---|---|
-| Docker 이미지 빌드와 `dwg2dxf` 실행 확인 | 미정 | 주 작업자 |
+| Lambda x86_64 이미지 빌드·import·파서 테스트 | 완료(2026-11-20) | 주 작업자 |
 | 실제 DXF·DWG·PDF 도면으로 호실·실내기 판정 검증 | 미정 | 미정 |
 | `meta.ingest.model`(인식 모델 버전) 기록 방식 결정 | 미정 | 미정 |

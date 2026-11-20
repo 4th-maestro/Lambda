@@ -10,7 +10,7 @@ import pathlib
 import tempfile
 
 import boto3
-from PIL import Image
+from PIL import Image, ImageOps
 
 import cad
 import common
@@ -64,6 +64,8 @@ def parse(ev):
             draft, detect = _cad(job, building, files, paths, pages, tmp)
         elif kind == 'pdf':
             draft, detect = _pdf(job, building, files, paths, opts, pages)
+        elif kind == 'image':
+            draft, detect = _image(job, building, files, paths, opts, pages)
         else:
             raise ValueError(f'지원하지 않는 kind: {kind}')
     key = f'jobs/{job}/draft.json'
@@ -156,9 +158,51 @@ def _pdf(job, building, files, paths, opts, pages):
     return draft, detect
 
 
+def _image(job, building, files, paths, opts, pages):
+    """이미지 도면도 PDF처럼 보정용 배경·인식 대상으로 변환. EXIF 방향을 PNG에 고정."""
+    floors, backgrounds, warnings = [], [], []
+    for _, path in paths:
+        if path.suffix.lower() not in IMAGE:
+            raise ValueError('이미지 작업에는 PNG·JPG 파일만 사용할 수 있습니다.')
+        with Image.open(path) as source:
+            if source.format not in ('PNG', 'JPEG'):
+                raise ValueError('PNG·JPEG 이미지가 아닙니다.')
+            if source.width * source.height > common.MAX_PX:
+                raise ValueError('도면 이미지가 최대 6,400만 화소를 초과합니다.')
+            with ImageOps.exif_transpose(source) as upright:
+                if upright.mode in ('RGBA', 'LA', 'PA') or 'transparency' in upright.info:
+                    with upright.convert('RGBA') as rgba, Image.new('RGBA', upright.size, 'white') as background:
+                        with Image.alpha_composite(background, rgba) as composed:
+                            image = composed.convert('RGB')
+                else:
+                    image = upright.convert('RGB')
+                try:
+                    key, px = pages.put(image), list(image.size)
+                finally:
+                    image.close()
+        fid = common.floor_hint(path.stem) or f'P{pages.n}'
+        if any(f['id'] == fid for f in floors):
+            warnings.append(f'{path.name}: 층 {fid}이 겹쳐 P{pages.n}로 지정')
+            fid = f'P{pages.n}'
+        ppm = opts.get('pxPerM')
+        if not ppm:
+            warnings.append(f'{path.name}: 축척 없음, 2D 화면에서 기준 치수 입력 필요')
+        floors.append({'id': fid, 'level': common.level(fid, pages.n), 'rooms': [], 'units': []})
+        backgrounds.append((key, px, ppm))
+    if not floors:
+        raise ValueError('이미지 파일이 없습니다.')
+    draft, _ = common.build(job, building, 'image', files, floors, warnings)
+    detect = []
+    for floor, (key, px, ppm) in zip(draft['floors'], backgrounds):
+        floor['background'] = {'key': key, 'px': px, 'toPlan': None}
+        detect.append({'floor': floor['id'], 'imageKey': key, 'pxPerM': ppm, 'toPlan': None})
+    return draft, detect
+
+
 def merge(ev):
     bucket, key = ev['bucket'], ev['draftKey']
-    draft = json.loads(s3.get_object(Bucket=bucket, Key=key)['Body'].read())
+    with s3.get_object(Bucket=bucket, Key=key)['Body'] as body:
+        draft = json.loads(body.read())
     units, review = common.merge(draft, ev.get('detections') or {})
     _put_json(bucket, key, draft)
     return {'draftKey': key, 'units': units, 'review': review}
