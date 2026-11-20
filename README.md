@@ -36,6 +36,22 @@
 
 `building` 쿼리와 `buildingId` 본문 값이 없으면 `main`이고, 목록에 없는 건물은 400(`알 수 없는 건물: <id>`)입니다. 소속 기업 밖 건물은 403(`이 건물에 접근할 권한이 없습니다.`)이고, WebSocket `ask`는 모델 호출 없이 `error` 이벤트입니다. 중지 기업 구성원은 403(`code: 'COMPANY_SUSPENDED'`)입니다. 소속 규칙은 아래 "기업·회원" 절에 있습니다. 판정 기준과 응답 필드는 [시스템 설계](../docs/human/explanation/architecture.md) 2절, 8절, 9절에 있습니다.
 
+## 챗봇 자동 운영 연동
+
+`src/operations.py`와 `tools.py`의 `list_operations`, `operations_action`이 자동 운영 내역 조회와 실행 초안을 처리합니다. 건물 접근 권한 검사는 기존 HTTP·WebSocket 질의 경로를 따릅니다. 만료된 pending은 expired로 읽고 skipped는 숨깁니다. 층·용도는 서버에서 검증하며, 최근 24시간 조회는 모든 DynamoDB 페이지를 읽습니다. 조회 결과의 `statusCounts`는 전체 일치 내역, `todayStatusCounts`는 처리 시각(`decidedAt`)을 KST로 변환한 오늘 내역이며 해당 필드가 없는 기존 항목만 생성 시각(`createdAt`)을 사용합니다. 어제 생성한 제안을 오늘 수락한 경우에도 오늘 건수에 포함합니다. `items`는 최대 20건입니다.
+
+`QueryFunction`과 `WsFunction`은 `OpsPrefix`(기본 maestro)의 Decisions·OpsSettings 테이블을 읽기 전용으로 참조합니다. 두 환경 변수 `DECISIONS_TABLE`, `OPS_SETTINGS_TABLE`이 없으면 정보를 사용할 수 없다고 응답합니다. 자동 운영 스위치는 채팅에서 바꾸지 않습니다.
+
+`opsDraft`는 `{action, buildingId, decisionIds, rooms}` 형식으로 HTTP 응답·WebSocket done 이벤트·대화 기록에 전달됩니다. 프런트의 실행 버튼만 기존 자동 운영 POST API를 호출하며 성공·409·실패를 구분합니다. 과거 대화에서 다시 불러온 초안은 실행할 수 없습니다.
+
+추가 평가 문항 o01~o08은 `eval/questions.json`에 있습니다. 운영 테이블을 읽거나 쓰지 않고 실제 Bedrock 모델만 호출하는 재현 명령은 다음과 같습니다(모델 호출 비용 발생).
+
+```sh
+AWS_PROFILE=maestro python tools/eval_operations.py --out eval/operations-results-2026-11-21.json
+```
+
+2026-11-21 로컬 구현 검증: 단위 테스트 177개 중 175개 통과·2개 건너뜀, 실제 모델 도구 선택 평가 8/8 통과. cfn-lint는 오류·경고 0개입니다. cfn-guard 3.3.0과 AWS 공식 규칙 6개로 QueryFunction·WsFunction의 생성 IAM 역할을 검사해 위반 0개를 확인했습니다(스택 전체 보안 감사나 계정의 배포 검증은 아님). 프런트는 빌드와 일괄 실행 테스트 2개를 통과했습니다. 이 검증은 로컬 코드 기준이며 운영 배포·실제 제안 실행 확인은 별도입니다.
+
 ## 테스트
 
 ```bash
