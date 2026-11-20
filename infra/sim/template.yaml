@@ -16,11 +16,19 @@ Parameters:
     Type: String
     Default: maestro/sim-origin-secret
     Description: CloudFront 비밀 헤더 값을 담은 Secrets Manager 이름(문자열 값)
+  # 판매사가 수정한 건물 정보(overrides: hours·weekend 등)가 있는 maestro 스택 BuildingOwnersTable(자동 생성 이름, 출력 없음)
+  # 비어 있으면 원본 Buildings 값만 사용
+  OwnersTableName:
+    Type: String
+    Default: ''
   ReservedConcurrency:
     Type: Number
     Default: 2
     MinValue: 1
     MaxValue: 10
+
+Conditions:
+  HasOwners: !Not [!Equals [!Ref OwnersTableName, '']]
 
 Resources:
   SimFunction:
@@ -37,6 +45,15 @@ Resources:
       Environment:
         Variables:
           SIM_SECRET: !Sub '{{resolve:secretsmanager:${SimSecretName}}}'
+          # 등록 건물 운영 시간(hours·weekend): 판매사가 대시보드에서 정한 값으로 도면의 operation을 덮어씀(maestro-twin 스택 테이블)
+          BUILDINGS_TABLE: !Sub ${Prefix}-Buildings
+          OWNERS_TABLE: !Ref OwnersTableName
+      Policies:
+        - DynamoDBReadPolicy: {TableName: !Sub '${Prefix}-Buildings'}
+        - !If
+          - HasOwners
+          - DynamoDBReadPolicy: {TableName: !Ref OwnersTableName}
+          - !Ref AWS::NoValue
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: BUFFERED
