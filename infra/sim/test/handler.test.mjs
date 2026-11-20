@@ -12,7 +12,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 process.env.TWIN_SRC = path.join(HERE, '..', 'twin');
 process.env.TWIN_WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'sim-test-'));
 process.env.SIM_SECRET = 's3cret';
-const { handler, hostDir, demoDir, BadRequest, load } = await import('../handler.mjs');
+const { handler, hostDir, demoDir, BadRequest, load, operationOf, withDashboardOperation, deps, profileOf, mergeProfile } = await import('../handler.mjs');
+const realGet = deps.getBuilding;
 await load();
 
 const DEMO = JSON.parse(fs.readFileSync(path.join(process.env.TWIN_SRC, 'data', 'busan-station', 'building.json'), 'utf8'));
@@ -65,7 +66,58 @@ test('compare 입력 오류는 400', async () => {
   assert.equal(big.statusCode, 413);
 });
 
+test('대시보드 운영 시간 → 트윈 operation', () => {
+  assert.deepEqual(operationOf({ hours:[8, 21], weekend:true }).weekend, ['08:00', '21:00']);
+  assert.deepEqual(operationOf({ hours:[9, 18], weekend:false }), { source:'대시보드 건물 설정(운영 시간·주말 운영)', weekday:['09:00', '18:00'], weekend:null });
+  assert.deepEqual(operationOf({ hours:[0, 24], weekend:true }).weekday, ['00:00', '24:00']);
+  for (const bad of [null, {}, { hours:[9] }, { hours:[18, 9] }, { hours:[9, 25] }, { hours:[8.5, 18] }]) assert.equal(operationOf(bad), null);
+});
+
+test('원본 위에 판매사 수정값을 덮어씀(대시보드와 같은 값)', () => {
+  // 2026-11-21 ifc건물: 원본 09~18시·주말 휴무, 판매사 화면에서 02~24시·주말 운영으로 저장(OWNERS overrides)
+  const base = profileOf({ hours:{ L:[{ N:'9' }, { N:'18' }] }, weekend:{ BOOL:false } });
+  const over = profileOf({ hours:{ L:[{ N:'2' }, { N:'24' }] }, weekend:{ BOOL:true } });
+  assert.deepEqual(mergeProfile(base, over), { hours:[2, 24], weekend:true });
+  assert.deepEqual(mergeProfile(base, profileOf({ weekend:{ BOOL:true } })), { hours:[9, 18], weekend:true });   // 일부만 수정
+  assert.deepEqual(mergeProfile(base, null), base);
+  assert.deepEqual(mergeProfile(null, over), over);                                                           // 원본 항목 없음
+  assert.equal(mergeProfile(null, null), null);
+  assert.equal(profileOf({ name:{ S:'x' } }), null);
+});
+
+test('등록 건물 도면에 대시보드 운영 시간 적용', async (t) => {
+  t.after(() => { deps.getBuilding = realGet; });
+  const asked = [];
+  deps.getBuilding = async id => { asked.push(id); return { hours:[9, 18], weekend:true }; };
+  const B = await withDashboardOperation(host('b-test01'));
+  assert.deepEqual(B.operation.weekend, ['09:00', '18:00']);
+  assert.deepEqual(asked, ['b-test01']);
+  assert.notEqual(DEMO.operation?.source, B.operation.source);   // 원본 도면 객체는 그대로
+  deps.getBuilding = async () => null;                            // 대시보드에 없는 건물: 도면 값 유지
+  assert.deepEqual((await withDashboardOperation(host('b-none'))).operation, DEMO.operation);
+  deps.getBuilding = async () => { throw new Error('denied'); };  // 조회 실패: 도면 값 유지(계산은 계속)
+  assert.deepEqual((await withDashboardOperation(host('b-err'))).operation, DEMO.operation);
+  // 형식 오류 도면은 조회 없이 400
+  asked.length = 0; deps.getBuilding = async id => { asked.push(id); return null; };
+  assert.equal((await handler(ev('POST', '/api/sim/compare', { building:host('../x') }))).statusCode, 400);
+  assert.deepEqual(asked, []);
+});
+
 const EP = process.env.ENERGYPLUS_DIR && fs.existsSync(process.env.ENERGYPLUS_DIR);
+test('토요일: 대시보드가 주말 운영이면 난방이 켜져 절감이 생김', { skip:!EP && 'ENERGYPLUS_DIR 없음', timeout:300_000 }, async (t) => {
+  t.after(() => { deps.getBuilding = realGet; });
+  // 화면 '시간 지정 08:00~21:00, 오늘 실측 기준'과 같은 요청(2026-11-21 토요일 05:40, 실측 기록 없음)
+  const req = { building:host('b-weekend'), scenario:{ name:'내 선택', mode:'heat', coolSetpoint:24, hours:['08:00', '21:00'] },
+    live:{ schema:'twin.live/v1', date:'2026-11-21', day:'토', now:5.67, forecast:{}, hours:{} } };
+  const run = async weekend => { deps.getBuilding = async () => ({ hours:[8, 21], weekend });
+    const r = await handler(ev('POST', '/api/sim/compare', req)); assert.equal(r.statusCode, 200, r.body.slice(0, 300)); return json(r); };
+  const off = await run(false), on = await run(true);
+  assert.equal(off.compare.savedKwh, 0);                 // 주말 휴무: 기존·선택 모두 난방 안 켬(화면에서 본 0)
+  assert.notEqual(on.compare.savedKwh, 0);               // 주말 운영: 08~21시 재실 시간대 난방 → 24℃ 선택과 기존 운전 차이
+  assert.ok(on.baseline.kpi.elecKwh > 0);
+});
+
+
 test('EnergyPlus 실제 계산: 데모 건물과 등록 건물 도면', { skip:!EP && 'ENERGYPLUS_DIR 없음', timeout:300_000 }, async () => {
   const scenario = { name:'내 선택', mode:'heat', coolSetpoint:20 };
   const demo = await handler(ev('POST', '/api/sim/compare', { data:'data/busan-station/', scenario }));
