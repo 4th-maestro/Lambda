@@ -164,6 +164,51 @@ class OperatorTest(unittest.TestCase):
         self.assertNotIn('facts', op.jev_state(buildings.get('main'), room, T, [], facts=False))  # 이전 형식
 
 
+class FairOrderTest(unittest.TestCase):
+    Q = {'A': ['a1', 'a2', 'a3', 'a4', 'a5'], 'B': ['b1', 'b2'], 'C': ['c1']}
+
+    def test_round_robin(self):
+        picked, deferred = op.fair_order(self.Q, 0, 5)
+        self.assertEqual([c for _, c in picked], ['a1', 'b1', 'c1', 'a2', 'b2'])
+        self.assertEqual([c for _, c in deferred], ['a3', 'a4', 'a5'])
+
+    def test_rotation_changes_first_building(self):
+        self.assertEqual(op.fair_order(self.Q, 1, 3)[0][0], ('B', 'b1'))
+        self.assertEqual(op.fair_order(self.Q, 2, 3)[0][0], ('C', 'c1'))
+        t5 = T + dt.timedelta(minutes=5)
+        self.assertEqual((op.rotation(t5, 3) - op.rotation(T, 3)) % 3, 1)  # 5분마다 한 칸 이동
+        self.assertEqual(op.rotation(T, 0), 0)
+
+    def test_leftover_calls_not_wasted(self):
+        picked, deferred = op.fair_order({'A': ['a1', 'a2', 'a3'], 'B': ['b1']}, 0, 10)
+        self.assertEqual(len(picked), 4)  # 상한보다 후보가 적으면 전부 판단
+        self.assertEqual(deferred, [])
+        picked, _ = op.fair_order({'A': list('123456789'), 'B': []}, 1, 5)
+        self.assertEqual(len(picked), 5)  # 한 건물만 후보가 있으면 상한을 모두 사용
+
+    def test_run_spreads_buildings_and_orders_by_energy(self):
+        s = Store()
+        with s.patch(), mock.patch.dict(os.environ, {'MAX_JEV_PER_RUN': '4'}):
+            out, counts, calls = op.run(T, [], ask=EMPTY)
+        idle = [d for d in out if d['kind'] == 'idle']
+        self.assertEqual(calls, 4)
+        cands = {b['id'] for b in buildings.LIST if any(op.is_idle(r, T, []) for r in buildings.rooms(b['id']))}
+        self.assertEqual(len({d['buildingId'] for d in idle}), min(4, len(cands)))  # 건물마다 한 건씩
+        # 같은 건물 안에서는 빈 채 운전 전력량 내림차순
+        by_b = {}
+        for d in idle:
+            by_b.setdefault(d['buildingId'], []).append(d['evidence']['facts']['idleEnergyKwh'])
+        for kwh in by_b.values():
+            self.assertEqual(kwh, sorted(kwh, reverse=True))
+
+    def test_first_pick_is_max_energy_room(self):
+        s = Store()
+        with s.patch(), mock.patch.dict(os.environ, {'MAX_JEV_PER_RUN': '100'}):
+            out, _, _ = op.run(T, [], ask=EMPTY)
+        main = [d['evidence']['facts']['idleEnergyKwh'] for d in out if d['kind'] == 'idle' and d['buildingId'] == 'main']
+        self.assertEqual(main[0], max(main))
+
+
 class FactsTest(unittest.TestCase):
     B = {'weekend': False}
 
@@ -221,7 +266,7 @@ class ApiTest(unittest.TestCase):
         code, body = self.call(s, event('GET'))
         self.assertEqual(code, 200)
         self.assertFalse(body['settings']['autoApply'])
-        self.assertEqual(body['pendingCount'], len(s.by_status('pending')))
+        self.assertEqual(body['pendingCount'], len([d for d in s.by_status('pending') if d['buildingId'] == 'main']))
         self.assertNotIn('ttl', body['decisions'][0])
 
     def test_switch_roles(self):
