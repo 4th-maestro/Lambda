@@ -195,7 +195,7 @@ Resources:
       Handler: query.handler
       Timeout: 30
       Environment:
-        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion}
+        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion, KB_ID: !Ref KnowledgeBase}
       Policies:
         - DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}
         - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
@@ -209,6 +209,9 @@ Resources:
                 - !Sub
                   - arn:aws:bedrock:*::foundation-model/${Base}
                   - Base: !Select [1, !Split ['global.', !Ref ModelId]]
+            - Effect: Allow
+              Action: bedrock:Retrieve
+              Resource: !GetAtt KnowledgeBase.KnowledgeBaseArn
       Events:
         Post: {Type: HttpApi, Properties: {ApiId: !Ref Api, Path: /query, Method: POST}}
 
@@ -271,7 +274,7 @@ Resources:
       # 통합 응답 대기는 29초에서 끊기지만 함수는 계속 실행되어 이벤트 전송, 화면 제한 45초보다 길게 설정
       Timeout: 60
       Environment:
-        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion}
+        Variables: {MODEL_ID: !Ref ModelId, BEDROCK_REGION: !Ref BedrockRegion, KB_ID: !Ref KnowledgeBase}
       Policies:
         - DynamoDBReadPolicy: {TableName: !Ref SchedulesTable}
         - DynamoDBCrudPolicy: {TableName: !Ref ChatTable}
@@ -284,8 +287,84 @@ Resources:
                   - arn:aws:bedrock:*::foundation-model/${Base}
                   - Base: !Select [1, !Split ['global.', !Ref ModelId]]
             - Effect: Allow
+              Action: bedrock:Retrieve
+              Resource: !GetAtt KnowledgeBase.KnowledgeBaseArn
+            - Effect: Allow
               Action: execute-api:ManageConnections
               Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WsApi}/prod/POST/@connections/*
+
+  # 규정·쾌적성 문서 RAG(FR-18). 원본은 KbDocsBucket(lambda/kb, tools/kb_sync.sh로 동기화와 수집)
+  # 벡터 저장소는 S3 Vectors: OpenSearch Serverless 최소 월 약 214달러 대신 사용량 과금(2026-11-20 Seoul 단가 조회)
+  KbDocsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+
+  KbVectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+
+  KbIndex:
+    Type: AWS::S3Vectors::Index
+    Properties:
+      VectorBucketArn: !GetAtt KbVectorBucket.VectorBucketArn
+      DataType: float32
+      Dimension: 1024
+      DistanceMetric: cosine
+      MetadataConfiguration:
+        # Bedrock이 청크 원문과 메타데이터를 넣는 키는 필터 대상에서 제외(필터 메타데이터 크기 한도)
+        NonFilterableMetadataKeys: [AMAZON_BEDROCK_TEXT, AMAZON_BEDROCK_METADATA]
+
+  KbRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition: {StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}}
+      Policies:
+        - PolicyName: kb
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource: [!GetAtt KbDocsBucket.Arn, !Sub '${KbDocsBucket.Arn}/*']
+              - Effect: Allow
+                Action: [s3vectors:PutVectors, s3vectors:GetVectors, s3vectors:DeleteVectors, s3vectors:QueryVectors, s3vectors:GetIndex, s3vectors:ListVectors]
+                Resource: !GetAtt KbIndex.IndexArn
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub ${AWS::StackName}-docs
+      RoleArn: !GetAtt KbRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0
+          EmbeddingModelConfiguration: {BedrockEmbeddingModelConfiguration: {Dimensions: 1024}}
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration: {IndexArn: !GetAtt KbIndex.IndexArn}
+
+  KbDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: docs
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration: {BucketArn: !GetAtt KbDocsBucket.Arn}
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration: {MaxTokens: 300, OverlapPercentage: 20}
 
   WebBucket:
     Type: AWS::S3::Bucket
@@ -351,3 +430,10 @@ Outputs:
     Value: !Ref UserPool
   UserPoolClientId:
     Value: !Ref UserPoolClient
+  KbId:
+    Value: !Ref KnowledgeBase
+  KbDataSourceId:
+    Value: !GetAtt KbDataSource.DataSourceId
+  KbDocsBucketName:
+    Description: tools/kb_sync.sh 문서 동기화 대상
+    Value: !Ref KbDocsBucket
