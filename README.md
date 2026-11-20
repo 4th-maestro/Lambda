@@ -238,7 +238,7 @@ python3 tools/migrate_tenancy.py --user-pool-id "$POOL" --profile maestro
 
 ### 배포 전 확인
 
-1. 도면 파서 `ingest/`(브랜치 `feat/plan-parsers`)가 `dev`에 머지되었는지 확인하십시오. `ingest/Dockerfile`이 없으면 `sam build`가 실패합니다. 이미지의 기본 명령은 `app.handler`, 아키텍처는 arm64입니다.
+1. 도면 파서 `ingest/`(브랜치 `feat/plan-parsers`)가 `dev`에 머지되었는지 확인하십시오. `ingest/Dockerfile`이 없으면 `sam build`가 실패합니다. 이미지의 기본 명령은 `app.handler`, 아키텍처는 x86_64입니다(ifcopenshell aarch64 바이너리의 GLIBC 2.38 요구, `ingest/README.md` 3절). Apple Silicon에서는 amd64 에뮬레이션이 되는 Docker 빌더가 필요합니다.
 2. Docker를 실행한 상태에서 `sam build`를 실행하십시오. 배포 명령에는 `--resolve-image-repos`가 필요합니다.
 3. Serverless Endpoint `hvac-symbol-detector-sls`를 `ml/serve/` 스크립트로 먼저 만드십시오. Endpoint가 없으면 인식 단계가 실패하고 작업은 `failed`가 됩니다. Serverless Endpoint는 호출이 없으면 요금이 없습니다.
 4. `Runtime`은 Globals가 아니라 zip 함수마다 지정합니다. Globals에 두면 이미지 함수도 `Runtime`을 받아 SAM 변환 오류가 발생합니다.

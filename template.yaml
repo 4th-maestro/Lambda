@@ -22,7 +22,7 @@ Parameters:
 Globals:
   Function:
     # Runtime은 zip 함수마다 지정: Globals에 두면 이미지 함수(IngestFunction)도 Runtime을 받아 SAM 변환 오류
-    Architectures: [arm64]
+    # Architectures도 함수마다 지정: Globals 목록은 함수 값과 합쳐져 IngestFunction(x86_64)이 2개 값이 됨
     CodeUri: src/
     # CPU는 메모리에 비례(1,769MB에서 vCPU 1개). 512MB(약 0.3 vCPU)는 첫 호출 2.6~2.9초(2026-11-20 실측)
     MemorySize: 1024
@@ -175,6 +175,7 @@ Resources:
   PreSignUpFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: signup.handler
       Runtime: python3.12
       Policies:
@@ -193,6 +194,7 @@ Resources:
   PostConfirmationFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: confirm.handler
       Runtime: python3.12
       Policies:
@@ -210,6 +212,7 @@ Resources:
   WsAuthorizerFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: auth.handler
       Runtime: python3.12
       Environment:
@@ -239,6 +242,7 @@ Resources:
   ApiFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: api.handler
       Runtime: python3.12
       MemorySize: 1769
@@ -336,6 +340,7 @@ Resources:
   QueryFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: query.handler
       Runtime: python3.12
       Timeout: 30
@@ -421,6 +426,7 @@ Resources:
   WsFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: ws.handler
       Runtime: python3.12
       # 통합 응답 대기는 29초에서 끊기지만 함수는 계속 실행되어 이벤트 전송, 화면 제한 45초보다 길게 설정
@@ -545,12 +551,14 @@ Resources:
           - {Id: expire-jobs, Status: Enabled, Prefix: jobs/, ExpirationInDays: 7}
 
   # 도면 파서(ingest/, 컨테이너 이미지, app.handler): op parse(형식별 초안·도면 이미지 생성), op merge(인식 결과 병합)
-  # - 이미지 빌드는 Docker 필요(sam build), 배포는 --resolve-image-repos. 아키텍처는 Globals arm64
+  # - 이미지 빌드는 Docker 필요(sam build), 배포는 --resolve-image-repos
+  # - 아키텍처 x86_64: ifcopenshell 0.9.0 aarch64 바이너리는 GLIBC 2.38 필요, Lambda python:3.12 이미지는 2.34(2026-11-20 배포 후 import 실패)
   # - 권한: 업로드 읽기(uploads/), 초안·도면 이미지 읽기·쓰기(jobs/)
   IngestFunction:
     Type: AWS::Serverless::Function
     Properties:
       PackageType: Image
+      Architectures: [x86_64]
       MemorySize: 3008
       Timeout: 900
       Policies:
@@ -577,6 +585,7 @@ Resources:
   DetectFunction:
     Type: AWS::Serverless::Function
     Properties:
+      Architectures: [arm64]
       Handler: detect.handler
       Runtime: python3.12
       Timeout: 600
