@@ -56,6 +56,22 @@ class UsageTest(unittest.TestCase):
         self.assertIn(f"{f['usedWeeks']}/4회", s)
         self.assertEqual(usage.sentence({**f, 'idleOnWeeks': 0}).count('빈 채'), 0)
 
+    def test_baseline_matches_sim(self):
+        days = [T.replace(hour=0) - dt.timedelta(days=7 * w) for w in range(1, 5)]
+        on = [s for s in (sim.state(ROOM, d.replace(hour=14, minute=30), []) for d in days) if s['onOff']]
+        b = usage.baseline(ROOM, T, [])
+        self.assertEqual(b['onWeeks'], len(on))
+        self.assertEqual(b['onAvgKw'], round(sum(s['powerKw'] for s in on) / len(on), 2) if on else None)
+        self.assertEqual(b['onMaxOccupants'], max((s['occupants'] for s in on), default=0))
+        self.assertEqual(usage.baseline(ROOM, T, [], hour=3)['onWeeks'], 0)  # 새벽은 평소 꺼짐
+
+    def test_baseline_ignores_schedules_created_later(self):
+        # 오늘 만든 켜기 스케줄은 지난 같은 요일에 없던 것으로 계산(sim은 스케줄을 날짜 구분 없이 적용)
+        on = {'id': 's1', 'roomIds': [ROOM['id']], 'action': 'on', 'time': '00:00', 'condition': 'always'}
+        self.assertEqual(usage.baseline(ROOM, T, [{**on, 'createdAt': T.isoformat()}], hour=3)['onWeeks'], 0)
+        self.assertEqual(usage.baseline(ROOM, T, [{**on, 'createdAt': '2026-09-01T00:00:00+09:00'}], hour=3)['onWeeks'], 4)
+        self.assertEqual(usage.baseline(ROOM, T, [on], hour=3)['onWeeks'], 4)  # createdAt 없으면 예전부터 있던 것으로 봄
+
     def test_busy_and_peak_hours(self):
         rates = [0] * 24
         rates[9:12] = [0.75, 1.0, 0.5]
