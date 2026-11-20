@@ -19,6 +19,9 @@ COPY --from=adapter /lambda-adapter /opt/extensions/lambda-adapter
 ENV ENERGYPLUS_DIR=/opt/energyplus TWIN_SRC=/app/twin TWIN_WORK=/tmp/twin \
     PORT=8080 AWS_LWA_PORT=8080 AWS_LWA_READINESS_CHECK_PATH=/healthz
 WORKDIR /app
+# 대시보드 건물 설정 조회용 DynamoDB 클라이언트(이 이미지는 Lambda 기본 이미지가 아니라 AWS SDK가 없음)
+COPY package.json package-lock.json /app/
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY handler.mjs server.mjs default-tariff.json /app/
 COPY twin /app/twin
 # 빌드 때 실행 확인: 라이브러리가 모자라면 여기서 실패

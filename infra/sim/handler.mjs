@@ -8,6 +8,9 @@
 //   data:     데모 건물 폴더(twin/data/buildings.json 의 data 값만 허용, 예 'data/busan-station/')
 //   building: 판매사가 등록한 건물의 도면(twin.building/v1, 대시보드가 GET /buildings/{id}/twin 으로 받아 트윈이 전달)
 //             → /tmp/twin/data/host/<내용 해시>/building.json 으로 쓰고 그 폴더로 계산. 요금표는 기본값(일반용 갑)
+//             운영 시간(operation)은 대시보드 건물 설정으로 덮어씀: BUILDINGS_TABLE의 hours·weekend 위에
+//             판매사가 화면에서 수정한 값(OWNERS_TABLE 항목의 overrides)을 덮어쓴 값(대시보드 src/buildings.py와 같음)
+//             도면 변환 기본값(평일 08~21시, 주말 없음)이 남아 있으면 '주말 운영' 건물도 토요일에 난방이 켜지지 않아 절감 0(2026-11-21 확인)
 // - 접근: CloudFront가 붙이는 비밀 헤더(x-maestro-sim)가 SIM_SECRET과 같을 때만 처리(Function URL 직접 호출 차단)
 // - 동시 실행: Lambda 예약 동시성(template.yaml)으로 제한. 한 실행 환경은 한 번에 한 요청만 받음
 import fs from 'node:fs';
@@ -50,8 +53,8 @@ export function demoDir(data){
   return hit;
 }
 
-// 등록 건물 도면 검사 → /tmp 폴더에 쓰고 상대 경로 반환
-export function hostDir(B){
+// 등록 건물 도면 검사(형식 오류는 BadRequest)
+export function checkBuilding(B){
   if (!B || typeof B !== 'object' || Array.isArray(B)) throw new BadRequest('building은 객체여야 함');
   if (B.schema !== 'twin.building/v1') throw new BadRequest('building.schema는 twin.building/v1');
   const id = B.building?.id, size = B.building?.size;
@@ -62,6 +65,11 @@ export function hostDir(B){
   if (B.floors.length > LIMITS.floors || rooms > LIMITS.rooms || (B.idus || []).length > LIMITS.idus)
     throw new BadRequest(`도면이 너무 큼(층 ${LIMITS.floors}, 실 ${LIMITS.rooms}, 실내기 ${LIMITS.idus} 이하)`);
   if (!rooms) throw new BadRequest('building.floors에 실(rooms)이 없음');
+}
+
+// 등록 건물 도면 검사 → /tmp 폴더에 쓰고 상대 경로 반환
+export function hostDir(B){
+  checkBuilding(B);
   const json = JSON.stringify(B);
   const rel = `data/host/${crypto.createHash('sha1').update(json).digest('hex').slice(0, 12)}`;
   const dir = path.join(WORK, rel);
@@ -71,6 +79,57 @@ export function hostDir(B){
     fs.writeFileSync(path.join(dir, 'building.json'), json);
   }
   return rel;
+}
+
+// 대시보드 건물 설정 → 트윈 operation
+//   hours [시작, 종료] 0~24 정수 → 'HH:00', weekend true면 주말도 같은 시간, false면 주말 운영 없음(null)
+export function operationOf(item){
+  const h = (item?.hours || []).map(Number);
+  if (h.length !== 2 || !h.every(v => Number.isInteger(v) && v >= 0 && v <= 24) || h[0] >= h[1]) return null;
+  const span = h.map(v => `${String(v).padStart(2, '0')}:00`);
+  return { source:'대시보드 건물 설정(운영 시간·주말 운영)', weekday:span, weekend:item.weekend === true ? span : null };
+}
+
+// DynamoDB 항목의 hours·weekend → { hours?, weekend? } (없는 필드는 빼서 덮어쓰기에 쓰임)
+export function profileOf(m){
+  if (!m) return null;
+  const out = {};
+  if (Array.isArray(m.hours?.L)) out.hours = m.hours.L.map(x => +x.N);
+  if (typeof m.weekend?.BOOL === 'boolean') out.weekend = m.weekend.BOOL;
+  return Object.keys(out).length ? out : null;
+}
+
+// 대시보드와 같은 값: 원본(BUILDINGS_TABLE) 위에 판매사 수정값(OWNERS_TABLE 항목의 overrides)을 덮어씀(src/buildings.py와 같은 규칙)
+export function mergeProfile(base, overrides){
+  if (!base && !overrides) return null;
+  return { ...(base || {}), ...(overrides || {}) };
+}
+
+// 테스트에서 바꿔 끼우는 조회 함수: 건물 ID → { hours, weekend }(없으면 null)
+export const deps = {
+  async getBuilding(id){
+    const bt = process.env.BUILDINGS_TABLE, ot = process.env.OWNERS_TABLE;
+    if (!bt && !ot) return null;
+    const { DynamoDBClient, GetItemCommand } = await import('@aws-sdk/client-dynamodb');
+    deps.client ||= new DynamoDBClient({});
+    const get = (TableName, ProjectionExpression) => TableName
+      ? deps.client.send(new GetItemCommand({ TableName, Key:{ buildingId:{ S:id } }, ProjectionExpression })).then(r => r.Item || null) : null;
+    const [b, o] = await Promise.all([get(bt, 'hours, weekend'), get(ot, 'overrides')]);
+    return mergeProfile(profileOf(b), profileOf(o?.overrides?.M));
+  },
+};
+
+// 등록 건물 도면에 대시보드 운영 시간을 적용한 복사본(조회 실패·항목 없음이면 도면 값 그대로)
+export async function withDashboardOperation(B){
+  const id = B?.building?.id;
+  if (typeof id !== 'string' || !ID.test(id)) return B;
+  try {
+    const op = operationOf(await deps.getBuilding(id));
+    return op ? { ...B, operation:op } : B;
+  } catch (e) {
+    console.error(JSON.stringify({ sim:'operation-lookup-failed', building:id, message:String(e?.message).slice(0, 200) }));
+    return B;
+  }
 }
 
 const reply = (code, body) => ({ statusCode:code, headers:{ 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store' }, body:JSON.stringify(body) });
@@ -89,7 +148,9 @@ export async function handler(event){
   try {
     let req; try { req = JSON.parse(raw || '{}'); } catch { throw new BadRequest('JSON 형식 오류'); }
     const { scenario = {}, live = null, building = null, data = 'data/' } = req;
-    const dir = building ? hostDir(building) : demoDir(data);
+    // 검사 먼저(잘못된 도면은 조회 없이 400), 운영 시간을 바꾼 도면으로 폴더를 만듦(설정이 바뀌면 내용 해시가 달라져 결과 캐시도 새로 계산)
+    if (building) checkBuilding(building);
+    const dir = building ? hostDir(await withDashboardOperation(building)) : demoDir(data);
     const out = await sim.compare(dir, scenario, { ep:sim.findEnergyPlus(), live });
     console.log(JSON.stringify({ sim:'compare', building:out.building, host:!!building, live:!!out.live, ms:Date.now() - t0,
       runs:[out.baseline?.run?.seconds, out.scenario?.run?.seconds], cached:[!!out.baseline?.cached, !!out.scenario?.cached] }));
