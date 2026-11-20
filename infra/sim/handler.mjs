@@ -120,8 +120,10 @@ export const deps = {
 };
 
 // 등록 건물 도면에 대시보드 운영 시간을 적용한 복사본(조회 실패·항목 없음이면 도면 값 그대로)
-export async function withDashboardOperation(B){
-  const id = B?.building?.id;
+//   id: 대시보드 건물 ID(트윈이 보낸 buildingId). 도면 안 building.id는 도면 변환이 붙인 값이라 다를 수 있음
+//   (2026-11-21: ifc건물 b-41nq2wss의 도면 id b-n5zgijwk, pdf건물·레츠고는 'BLDG') → 없을 때만 도면 id로 조회
+export async function withDashboardOperation(B, buildingId = null){
+  const id = buildingId ?? B?.building?.id;
   if (typeof id !== 'string' || !ID.test(id)) return B;
   try {
     const op = operationOf(await deps.getBuilding(id));
@@ -147,12 +149,15 @@ export async function handler(event){
   const t0 = Date.now();
   try {
     let req; try { req = JSON.parse(raw || '{}'); } catch { throw new BadRequest('JSON 형식 오류'); }
-    const { scenario = {}, live = null, building = null, data = 'data/' } = req;
+    const { scenario = {}, live = null, building = null, data = 'data/', buildingId = null } = req;
+    if (buildingId != null && (typeof buildingId !== 'string' || !ID.test(buildingId))) throw new BadRequest('buildingId 형식 오류');
     // 검사 먼저(잘못된 도면은 조회 없이 400), 운영 시간을 바꾼 도면으로 폴더를 만듦(설정이 바뀌면 내용 해시가 달라져 결과 캐시도 새로 계산)
     if (building) checkBuilding(building);
-    const dir = building ? hostDir(await withDashboardOperation(building)) : demoDir(data);
+    const B = building ? await withDashboardOperation(building, buildingId) : null;
+    const dir = B ? hostDir(B) : demoDir(data);
     const out = await sim.compare(dir, scenario, { ep:sim.findEnergyPlus(), live });
-    console.log(JSON.stringify({ sim:'compare', building:out.building, host:!!building, live:!!out.live, ms:Date.now() - t0,
+    console.log(JSON.stringify({ sim:'compare', building:out.building, buildingId, operation:B?.operation?.source ? { weekday:B.operation.weekday, weekend:B.operation.weekend } : null,
+      host:!!building, live:!!out.live, ms:Date.now() - t0,
       runs:[out.baseline?.run?.seconds, out.scenario?.run?.seconds], cached:[!!out.baseline?.cached, !!out.scenario?.cached] }));
     return reply(200, out);
   } catch (e) {
