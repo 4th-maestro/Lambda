@@ -16,6 +16,7 @@ import customer
 import energy
 import history
 import plan
+import plan_ingest
 import portfolio
 import recommend
 import schedules
@@ -31,6 +32,7 @@ ROUTES = [
     ('/schedules', schedules.handler),
     ('/chat', chat.handler),
     ('/energy', energy.handler),
+    ('/plans', plan_ingest.handler),
     ('/admin', admin.handler),
     ('/company', customer.handler),
     # /me 하위 경로라 /me보다 먼저 확인
@@ -40,9 +42,9 @@ ROUTES = [
 
 
 def route(path):
-    # 건물 도면(/buildings/{id}/plan)과 건물 정보 수정(/buildings/{id})은 목록(/buildings)보다 먼저 확인
+    # 건물 도면(/plan), 트윈 조회·확정 저장(/twin), 건물 정보 수정(/buildings/{id})은 목록(/buildings)보다 먼저 확인
     if path.startswith('/buildings/'):
-        return plan.handler if path.endswith('/plan') else customer.handler
+        return plan.handler if path.endswith('/plan') else admin.twin if path.endswith('/twin') else customer.handler
     return next((fn for prefix, fn in ROUTES if path == prefix or path.startswith(prefix + '/')), None)
 
 
