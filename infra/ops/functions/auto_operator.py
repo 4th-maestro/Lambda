@@ -13,6 +13,9 @@
   - 그 외 → pending 제안(SUGGESTION_TTL_MIN, 기본 30분 뒤 만료)
 - 중복 방지: 진행 중(pending·applied·accepted) 호실, 쿨다운(COOLDOWN_MIN, 기본 120분) 안의 거절·되돌림·재실 판단·알림 호실은 건너뜀
 - Jev 호출 상한: 실행당 MAX_JEV_PER_RUN(기본 10)건, 넘는 후보는 다음 실행으로 미룸(deferred)
+  - 배분: 건물마다 한 건씩 돌아가며 선택(한 건물이 상한을 독차지하지 않게), 시작 건물은 5분 실행마다 한 칸씩 이동
+  - 건물 안 순서: 빈 채 운전 전력량(facts.idleEnergyKwh) 큰 방부터 → 상한으로 밀려도 절감 효과 큰 방이 먼저 제안됨
+  - 다른 건물 후보가 없으면 한 건물이 상한을 모두 사용(남는 호출을 버리지 않음)
 - 만료: 응답 기한이 지난 pending을 expired로 바꿈
 - 로컬 확인(Lambda 폴더에서, DynamoDB·Jev 호출 없음): python -X utf8 infra/ops/functions/auto_operator.py --dry-run
 """
@@ -173,6 +176,35 @@ def gate(answer, auto_apply, conf_min, empty_min):
     return 'pending'
 
 
+def _base(bid, room, t, ttl):
+    return {'buildingId': bid, 'roomId': room['id'], 'roomName': room['name'], 'floor': room['floor'], 'use': room['use'],
+            'createdAt': t.isoformat(), 'ttl': ttl}
+
+
+def rotation(t, n):
+    """시작 건물 위치: 5분 실행마다 한 칸씩 이동(같은 건물이 늘 먼저 판단받지 않게)"""
+    return int(t.timestamp() // 300) % n if n else 0
+
+
+def fair_order(queues, start, limit):
+    """건물별 대기열에서 한 건씩 돌아가며 limit건 선택: ([(건물, 후보)], [미룬 (건물, 후보)])
+    - 건물 순서는 queues 순서를 start만큼 회전, 각 건물 안은 대기열 순서(전력량 큰 방부터)
+    - 다른 건물 후보가 없으면 한 건물이 상한을 모두 써도 됨(남는 호출을 버리지 않음)
+    """
+    order = list(queues)
+    order = order[start:] + order[:start]
+    picked, idx = [], {b: 0 for b in order}
+    while len(picked) < limit and any(idx[b] < len(queues[b]) for b in order):
+        for b in order:
+            if len(picked) >= limit:
+                break
+            if idx[b] < len(queues[b]):
+                picked.append((b, queues[b][idx[b]]))
+                idx[b] += 1
+    deferred = [(b, c) for b in order for c in queues[b][idx[b]:]]
+    return picked, deferred
+
+
 def run(t, schedules, ask=None, write=True):
     """전 건물 1회 판단. write=False면 저장 없이 결정 목록만 반환(로컬 dry-run)"""
     import buildings
@@ -184,8 +216,10 @@ def run(t, schedules, ask=None, write=True):
     max_jev = oc.env_int('MAX_JEV_PER_RUN', 10)
     since = t - dt.timedelta(minutes=max(cooldown, ttl_min) + 5)
     ttl = int((t + dt.timedelta(days=oc.HISTORY_DAYS)).timestamp())
-    out, counts, jev_calls = [], {'pending': 0, 'applied': 0, 'skipped': 0, 'alert': 0, 'expired': 0, 'deferred': 0}, 0
+    out, counts = [], {'pending': 0, 'applied': 0, 'skipped': 0, 'alert': 0, 'expired': 0, 'deferred': 0}
     buildings.forget()
+    # 1) 건물별 후보 수집: 이상은 바로 알림, 빈 방 운전은 Jev 판단 대기열(빈 채 운전 전력량 큰 방부터)
+    queues, ctx = {}, {}
     for b in buildings.LIST:
         bid = b['id']
         settings = oc.get_settings(bid) if write else {'autoApply': False}
@@ -195,43 +229,47 @@ def run(t, schedules, ask=None, write=True):
                 d['status'] = 'expired'
                 counts['expired'] += 1
         blocked = oc.blocked_rooms(recent, t, cooldown)
+        ctx[bid] = (b, settings)
         for room in buildings.rooms(bid):
             if room.get('active') is False:
                 continue
             rid = room['id']
-            base = {'buildingId': bid, 'roomId': rid, 'roomName': room['name'], 'floor': room['floor'], 'use': room['use'],
-                    'createdAt': t.isoformat(), 'ttl': ttl}
             st = sim.state(room, t, schedules)
             if st['anomaly'] and ('anomaly', rid) not in blocked:
-                out.append({**base, 'decisionId': oc.new_decision_id(t), 'kind': 'anomaly', 'status': 'alert',
+                out.append({**_base(bid, room, t, ttl), 'decisionId': oc.new_decision_id(t), 'kind': 'anomaly', 'status': 'alert',
                             'message': oc.anomaly_message(room, st),
                             'evidence': {k: st[k] for k in ('temp', 'setpoint', 'mode', 'onOff', 'anomaly')}})
                 counts['alert'] += 1
             if ('idle', rid) in blocked or not is_idle(room, t, schedules):
                 continue
-            if jev_calls >= max_jev:
-                counts['deferred'] += 1
-                continue
-            jev_calls += 1
-            state = jev_state(b, room, t, schedules)
-            answer = judge(state, ask)
-            status = gate(answer, settings['autoApply'], conf_min, empty_min)
-            minutes = max(IDLE_MINUTES[-1], state['facts']['idleOnMinutes'])
-            label = oc.duration(minutes, state['facts']['idleOnCapped'])
-            item = {**base, 'decisionId': oc.new_decision_id(t), 'kind': 'idle', 'status': status, 'jev': answer,
-                    'autoApply': settings['autoApply'], 'evidence': {'recent': state['recent'], 'facts': state['facts']}}
-            if status == 'applied':
-                sched = oc.off_schedule(bid, rid, t, f"{room['floor']} {room['name']} {label} 재실 0명")
-                if write:
-                    oc.save_schedule(sched)
-                item.update(scheduleId=sched['id'], message=oc.applied_message(room, label), decidedAt=t.isoformat(), decidedBy=oc.SOURCE)
-            elif status == 'pending':
-                item.update(message=oc.idle_message(room, label, st['powerKw']),
-                            expiresAt=(t + dt.timedelta(minutes=ttl_min)).isoformat())
-            else:
-                item.update(message=None, decidedAt=t.isoformat(), decidedBy='Jev')
-            out.append(item)
-            counts[status] += 1
+            queues.setdefault(bid, []).append((room, st, jev_state(b, room, t, schedules)))
+    for q in queues.values():
+        q.sort(key=lambda c: (-c[2]['facts']['idleEnergyKwh'], c[0]['id']))
+    # 2) Jev 호출 상한을 건물별로 한 건씩 돌아가며 배분, 시작 건물은 실행마다(5분 단위) 바뀜
+    picked, deferred = fair_order(queues, rotation(t, len(queues)), max_jev)
+    counts['deferred'] = len(deferred)
+    # 3) 판단·결정
+    for bid, (room, st, state) in picked:
+        b, settings = ctx[bid]
+        answer = judge(state, ask)
+        status = gate(answer, settings['autoApply'], conf_min, empty_min)
+        minutes = max(IDLE_MINUTES[-1], state['facts']['idleOnMinutes'])
+        label = oc.duration(minutes, state['facts']['idleOnCapped'])
+        item = {**_base(bid, room, t, ttl), 'decisionId': oc.new_decision_id(t), 'kind': 'idle', 'status': status, 'jev': answer,
+                'autoApply': settings['autoApply'], 'evidence': {'recent': state['recent'], 'facts': state['facts']}}
+        if status == 'applied':
+            sched = oc.off_schedule(bid, room['id'], t, f"{room['floor']} {room['name']} {label} 재실 0명")
+            if write:
+                oc.save_schedule(sched)
+            item.update(scheduleId=sched['id'], message=oc.applied_message(room, label), decidedAt=t.isoformat(), decidedBy=oc.SOURCE)
+        elif status == 'pending':
+            item.update(message=oc.idle_message(room, label, st['powerKw']),
+                        expiresAt=(t + dt.timedelta(minutes=ttl_min)).isoformat())
+        else:
+            item.update(message=None, decidedAt=t.isoformat(), decidedBy='Jev')
+        out.append(item)
+        counts[status] += 1
+    jev_calls = len(picked)
     if write:
         for item in out:
             oc.put_decision({k: v for k, v in item.items() if v is not None})
