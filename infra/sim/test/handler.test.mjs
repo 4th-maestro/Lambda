@@ -103,13 +103,30 @@ test('등록 건물 도면에 대시보드 운영 시간 적용', async (t) => {
   assert.deepEqual(asked, []);
 });
 
+test('운영 시간은 대시보드 건물 ID(buildingId)로 조회', async (t) => {
+  t.after(() => { deps.getBuilding = realGet; });
+  const asked = [];
+  deps.getBuilding = async id => { asked.push(id); return { hours:[2, 24], weekend:true }; };
+  // 2026-11-21 실제 도면: ifc건물 b-41nq2wss의 도면 id는 b-n5zgijwk, pdf건물·레츠고는 'BLDG'
+  assert.deepEqual((await withDashboardOperation(host('BLDG'), 'b-41nq2wss')).operation.weekday, ['02:00', '24:00']);
+  await withDashboardOperation(host('b-n5zgijwk'));                 // buildingId가 없으면(이전 트윈) 도면 id로 조회
+  assert.deepEqual(asked, ['b-41nq2wss', 'b-n5zgijwk']);
+  for (const bad of ['../x', 'a/b', '', 5]) {                        // 형식 오류는 조회 없이 400
+    asked.length = 0;
+    const r = await handler(ev('POST', '/api/sim/compare', { building:host('BLDG'), buildingId:bad }));
+    assert.equal(r.statusCode, 400, String(bad));
+    assert.deepEqual(asked, []);
+  }
+});
+
 const EP = process.env.ENERGYPLUS_DIR && fs.existsSync(process.env.ENERGYPLUS_DIR);
 test('토요일: 대시보드가 주말 운영이면 난방이 켜져 절감이 생김', { skip:!EP && 'ENERGYPLUS_DIR 없음', timeout:300_000 }, async (t) => {
   t.after(() => { deps.getBuilding = realGet; });
   // 화면 '시간 지정 08:00~21:00, 오늘 실측 기준'과 같은 요청(2026-11-21 토요일 05:40, 실측 기록 없음)
-  const req = { building:host('b-weekend'), scenario:{ name:'내 선택', mode:'heat', coolSetpoint:24, hours:['08:00', '21:00'] },
+  // 실제 등록 건물처럼 도면 id('BLDG')와 대시보드 건물 id가 다름 → buildingId로 조회해야 함
+  const req = { building:host('BLDG'), buildingId:'b-weekend', scenario:{ name:'내 선택', mode:'heat', coolSetpoint:24, hours:['08:00', '21:00'] },
     live:{ schema:'twin.live/v1', date:'2026-11-21', day:'토', now:5.67, forecast:{}, hours:{} } };
-  const run = async weekend => { deps.getBuilding = async () => ({ hours:[8, 21], weekend });
+  const run = async weekend => { deps.getBuilding = async id => id === 'b-weekend' ? { hours:[8, 21], weekend } : null;
     const r = await handler(ev('POST', '/api/sim/compare', req)); assert.equal(r.statusCode, 200, r.body.slice(0, 300)); return json(r); };
   const off = await run(false), on = await run(true);
   assert.equal(off.compare.savedKwh, 0);                 // 주말 휴무: 기존·선택 모두 난방 안 켬(화면에서 본 0)
