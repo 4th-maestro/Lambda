@@ -85,6 +85,8 @@ def run(name, args, t, bid):
     items = []
     for r in rows[:limit]:
         item = {k: r[k] for k in ('decisionId', 'roomId', 'floor', 'use', 'status', 'message', 'createdAt')}
+        if r.get('decidedAt'):
+            item['decidedAt'] = r['decidedAt']
         item['room'] = r['roomName']
         item['facts'] = r.get('evidence', {}).get('facts', {})
         if r.get('jev'):
@@ -94,5 +96,5 @@ def run(name, args, t, bid):
         items.append(item)
     return {'available': True, 'autoApply': bool(_settings(settings, bid).get('autoApply', False)), 'pendingCount': pending,
             'totalCount': len(rows), 'statusCounts': counts,
-            'todayStatusCounts': dict(Counter(r['status'] for r in rows if _timestamp(r['createdAt']).astimezone(sim.KST).date() == t.date())), 'hours': hours, 'since': since.isoformat(),
+            'todayStatusCounts': dict(Counter(r['status'] for r in rows if _timestamp(r.get('decidedAt') or r['createdAt']).astimezone(sim.KST).date() == t.date())), 'hours': hours, 'since': since.isoformat(),
             'truncated': len(rows) > limit, 'items': items}, {'highlight': list(dict.fromkeys(r['roomId'] for r in items))}

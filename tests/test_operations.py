@@ -93,6 +93,31 @@ class OperationsTest(unittest.TestCase):
         self.assertNotIn('applied', out['todayStatusCounts'])
         self.assertEqual(out['todayStatusCounts']['accepted'], 1)
 
+    def test_today_counts_use_decision_time_across_kst_midnight(self):
+        now = T.replace(hour=0, minute=10, second=0)
+        yesterday = (now - dt.timedelta(minutes=15)).isoformat()
+        for status in ('accepted', 'applied'):
+            with self.subTest(status=status):
+                item = decision(1, status, createdAt=yesterday,
+                                decidedAt=(now - dt.timedelta(minutes=5)).isoformat())
+                self.resource.meta.client.get_paginator.return_value.paginate.return_value = [{'Items': [item]}]
+                out, _ = tools.run('list_operations', {'status': 'done'}, now, [], 'main')
+                self.assertEqual(out['todayStatusCounts'], {status: 1})
+                self.assertEqual(out['items'][0]['decidedAt'], item['decidedAt'])
+
+    def test_today_counts_convert_decision_time_to_kst(self):
+        item = decision(1, 'accepted', minutes=120,
+                        decidedAt='2026-11-20T15:05:00+00:00')
+        self.resource.meta.client.get_paginator.return_value.paginate.return_value = [{'Items': [item]}]
+        out, _ = self.run_tool(status='done')
+        self.assertEqual(out['todayStatusCounts'], {'accepted': 1})
+
+    def test_today_counts_fall_back_to_created_at_for_legacy_records(self):
+        self.resource.meta.client.get_paginator.return_value.paginate.return_value = [{'Items': [
+            decision(1, 'accepted'), decision(2, 'applied', minutes=120)]}]
+        out, _ = self.run_tool(status='done')
+        self.assertEqual(out['todayStatusCounts'], {'accepted': 1})
+
     def test_filters_and_pending_exclude_expired(self):
         out, view = self.run_tool(status='pending', floor='1F', use='회의실')
         self.assertEqual(len(out['items']), 1)
