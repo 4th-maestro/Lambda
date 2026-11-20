@@ -4,6 +4,7 @@
 - 표본 오차: 5분 간격 12회 평균 대비 건물 일 합계 최대 0.82%, 건물 시간 값 최대 5.3%(3일 × 건물 4개, architecture.md 11절)
 - 스케줄: 시각을 HH:30 표본으로 판정하므로 시간 중간에 시작하는 스케줄은 해당 시간 전체에 반영되거나 빠짐(호실당 하루 최대 1시간)
 - 캐시: 지난 날짜의 (건물, 날짜, 적용 스케줄)별 층·용도 시간별 kWh를 모듈 메모리에 보관, 오늘은 요청마다 계산
+- 소속: compare는 호출자 소속 건물만 비교, 나머지는 building 소속 검사(tenant.py)
 - 전기요금: 일반용(갑)I 고압A 선택I 전력량요금 연평균 + 기후환경요금 + 연료비조정요금(docs/human/explanation/research/electricity-tariff.md)
 """
 import calendar
@@ -14,6 +15,7 @@ import json
 import buildings
 import common
 import sim
+import tenant
 
 # 전기요금 단가(원/kWh)
 # - 전력량요금 연평균 120.2: 여름 142.6 × 3개월, 봄·가을 98.6 × 5개월, 겨울 130.3 × 4개월(2023-05-16 요금표, 2026-11 동결 확인)
@@ -33,15 +35,25 @@ def _idle_on(room):
     return frozenset(range(h0 - 1, h1 + 3)) if on else frozenset()
 
 
-_ROOMS = {b['id']: buildings.rooms(b['id']) for b in buildings.LIST}
-_IDLE_ON = {r['id']: _idle_on(r) for rs in _ROOMS.values() for r in rs}
-_GROUPS = {bid: sorted({(r['floor'], r['use']) for r in rs}) for bid, rs in _ROOMS.items()}
+@functools.lru_cache(maxsize=4)
+def _meta(version):
+    # 건물별 호실, 호실별 운영 전후 가동 시간, 층·용도 묶음. 건물 데이터가 바뀌면(version) 다시 계산
+    rooms = {b['id']: buildings.rooms(b['id']) for b in buildings.LIST}
+    return rooms, {r['id']: _idle_on(r) for rs in rooms.values() for r in rs}, {bid: sorted({(r['floor'], r['use']) for r in rs}) for bid, rs in rooms.items()}
+
+
+def __getattr__(name):
+    # 기존 코드·테스트 호환: energy._ROOMS, _IDLE_ON, _GROUPS
+    if name in ('_ROOMS', '_IDLE_ON', '_GROUPS'):
+        return _meta(buildings.version())[('_ROOMS', '_IDLE_ON', '_GROUPS').index(name)]
+    raise AttributeError(name)
 
 
 def _compute(bid, day, schedules, until=None):
     # (층, 용도)별 시간 kWh 24칸. until이 있으면 그 시각까지(현재 시간은 경과분만)
     # - 재실 0명이고 빈 공간 운전 시간 밖이며 스케줄 대상이 아닌 호실은 sim.state 결과가 정지(0kW)라 호출 생략(1주 기준 호출 67% 감소)
-    out = {g: [0.0] * 24 for g in _GROUPS[bid]}
+    rooms_by, idle_on, groups = _meta(buildings.version())
+    out = {g: [0.0] * 24 for g in groups[bid]}
     for h in range(24):
         t0 = dt.datetime.combine(day, dt.time(h), sim.KST)
         frac = 1.0 if until is None else min(1.0, (until - t0).total_seconds() / 3600)
@@ -51,15 +63,15 @@ def _compute(bid, day, schedules, until=None):
         at = ts.isoformat()
         active = [s for s in schedules if s.get('createdAt', '') <= at]
         targeted = {i for s in active for i in s['roomIds']}
-        for r in _ROOMS[bid]:
-            if h not in _IDLE_ON[r['id']] and r['id'] not in targeted and sim.occupants(r, ts) == 0:
+        for r in rooms_by[bid]:
+            if h not in idle_on[r['id']] and r['id'] not in targeted and sim.occupants(r, ts) == 0:
                 continue
             out[(r['floor'], r['use'])][h] += sim.state(r, ts, active)['powerKw'] * frac
     return {g: tuple(v) for g, v in out.items()}
 
 
 @functools.lru_cache(maxsize=1024)
-def _past(bid, day, key):
+def _past(bid, day, key, version=None):
     # 건물 4개 × (이번 달 + 지난달 62일 + 히트맵 최대 56일) 이내라 1024개면 재계산 없음
     return _compute(bid, day, json.loads(key))
 
@@ -67,12 +79,12 @@ def _past(bid, day, key):
 def _groups(bid, day, schedules, now):
     # 지난 날짜는 캐시, 오늘은 현재 시각까지 계산, 미래는 0
     if day > now.date():
-        return {g: (0.0,) * 24 for g in _GROUPS[bid]}
+        return {g: (0.0,) * 24 for g in _meta(buildings.version())[2][bid]}
     mine = [s for s in schedules if s.get('buildingId', buildings.DEFAULT) == bid]
     if day == now.date():
         return _compute(bid, day, mine, now)
     end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), sim.KST).isoformat()
-    return _past(bid, day, json.dumps([s for s in mine if s.get('createdAt', '') < end], sort_keys=True, default=str))
+    return _past(bid, day, json.dumps([s for s in mine if s.get('createdAt', '') < end], sort_keys=True, default=str), buildings.version())
 
 
 def _hourly(bid, day, schedules, now):
@@ -125,12 +137,15 @@ def _same_point(bid, same, schedules, now):
     return total + (_upto(_hourly(bid, partial, schedules, now), now) if partial else 0)
 
 
-def compare(q, now):
+def compare(q, now, allowed=None):
+    # allowed: 비교 대상 건물 id 집합(None은 전체)
     period = _period(q, ('day', 'month'))
     schedules = common.list_schedules()
     cur, _, same = _span(period, now)
     items = []
     for b in buildings.LIST:
+        if allowed is not None and b['id'] not in allowed:
+            continue
         kwh = round(sum(sum(_hourly(b['id'], d, schedules, now)) for d in cur), 1)
         area = buildings.summary(b)['areaM2']
         items.append({
@@ -204,9 +219,13 @@ def handler(event, context):
     fn = ROUTES.get(event.get('routeKey', '').rsplit(' ', 1)[-1])
     if not fn:
         return common.resp(404, {'error': '없는 경로입니다.'})
-    now = sim.now()
+    now, q = sim.now(), event.get('queryStringParameters') or {}
     try:
-        body = fn(event.get('queryStringParameters') or {}, now)
+        if fn is compare:
+            body = compare(q, now, tenant.allowed_buildings(tenant.caller(event)))
+        else:
+            tenant.require_building(event, _building(q))
+            body = fn(q, now)
     except ValueError as e:  # 잘못된 building, period, weeks
         return common.resp(400, {'error': str(e)})
     return common.resp(200, {'generatedAt': now.isoformat(), 'virtual': True, **body})

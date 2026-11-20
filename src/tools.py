@@ -10,6 +10,7 @@
   - prefer=table이면 화면이 표를 먼저 표시
 """
 import datetime as dt
+import functools
 import os
 import re
 
@@ -18,8 +19,6 @@ import comfort
 import energy
 import sim
 
-FLOORS = sorted({f for b in buildings.LIST for f in b['floors']})
-USES = sorted({r['use'] for b in buildings.LIST for r in buildings.rooms(b['id'])})
 METRICS = {'powerKw': '전력(kW)', 'temp': '실내온도(℃)', 'humidity': '습도(%)', 'setpoint': '설정온도(℃)'}
 # 묶음 합계 지표: (표시 이름, 단위, 계산)
 AGG = {
@@ -31,7 +30,12 @@ AGG = {
 PERIODS = {'day': ('오늘', '어제', '시간별'), 'week': ('이번 주', '지난주', '일별'), 'month': ('이번 달', '지난달', '일별')}
 VIEW = {'type': 'string', 'enum': ['auto', 'chart', 'table'], 'description': '표시 방식 제안. 보통 auto, 사용자가 표를 원하면 table'}
 
-TOOLS = [
+@functools.lru_cache(maxsize=4)
+def _definitions(version):
+    # 도구 enum(층·용도)은 전체 건물 합집합: 건물 데이터가 바뀌면(version) 다시 생성
+    FLOORS = sorted({f for b in buildings.LIST for f in b['floors']}, key=buildings._floor_key)
+    USES = sorted({r['use'] for b in buildings.LIST for r in buildings.rooms(b['id'])})
+    return FLOORS, USES, [
     {
         'name': 'query_spaces',
         'description': '층·용도로 호실을 골라 현재 지표 순으로 조회한다. 전력·온도·습도·설정온도 질문에 사용한다.',
@@ -120,7 +124,18 @@ TOOLS = [
             },
         },
     },
-]
+    ]
+
+
+def definitions():
+    return _definitions(buildings.version())[2]
+
+
+def __getattr__(name):
+    # 기존 코드 호환: tools.FLOORS, tools.USES, tools.TOOLS
+    if name in ('FLOORS', 'USES', 'TOOLS'):
+        return _definitions(buildings.version())[('FLOORS', 'USES', 'TOOLS').index(name)]
+    raise AttributeError(name)
 
 
 def chips(name, args):

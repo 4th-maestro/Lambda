@@ -15,6 +15,7 @@ import buildings
 import chat
 import common
 import sim
+import tenant
 import tools
 
 # bedrock-runtime + global 추론 프로필: bedrock-mantle은 Sonnet 5.5 ID를 404로 거부(2026-11-20)
@@ -108,6 +109,10 @@ def handler(event, context):
         return common.resp(400, {'error': 'text는 1~500자'})
     if not b:
         return common.resp(400, {'error': f"알 수 없는 건물: {req.get('buildingId')}"})
+    try:
+        tenant.require_building(event, b['id'])
+    except tenant.Forbidden as e:
+        return common.resp(403, e.body())
     return common.resp(200, converse(text, lambda e: None, b['id'], chat.user(event)))
 
 
@@ -164,7 +169,7 @@ def run(text, emit, bid=None, memory=None):
     for _ in range(4):  # 문서 검색 후 계산 도구까지 4회
         chips = []  # 이번 라운드 도구 인자 조건(병렬 호출은 합침)
         with client.messages.stream(
-            model=MODEL, max_tokens=4096, system=prompt, tools=tools.TOOLS,
+            model=MODEL, max_tokens=4096, system=prompt, tools=tools.definitions(),
             output_config={'effort': 'low', 'format': ANSWER_FORMAT}, messages=messages,
         ) as stream:
             buf, shown = '', ''  # 라운드별 부분 JSON, 화면에 보낸 칸 텍스트
