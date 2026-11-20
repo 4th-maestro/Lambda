@@ -4,7 +4,7 @@
 - 구성원: PATCH·DELETE /admin/companies/{id}/members/{sub}(역할 변경, 소속 해제), 관리자(manager) 최소 1명
 - 변경 이력: GET /admin/companies/{id}/audit?limit=(최신순, 기본 50, 최대 200)
 - 건물 소속: GET /admin/buildings(소속 없는 건물 포함), PUT /admin/buildings/{id}/company {companyId | null}
-- 건물 관리: POST /admin/companies/{id}/buildings(등록), PUT /admin/buildings/{id}/twin(트윈·도면·호실 교체),
+- 건물 관리: POST /admin/companies/{id}/buildings(등록), PUT /buildings/{id}/twin(트윈·도면·호실 확정 저장, twin 함수),
   PATCH /admin/buildings/{id}(이름, 용도, 운영 시간, 주말 운영), DELETE /admin/buildings/{id}(영구 삭제, 변경 이력만 남김)
 - 사용자: GET /admin/users(가입한 사용자 이메일, 상태, 관리자 여부, 가입일)
 - 관리자 판정: 액세스 토큰 cognito:groups 클레임에 admin 포함(HTTP API JWT 권한 부여자가 서명 검증)
@@ -38,6 +38,7 @@ CARD = ('id', 'name', 'use', 'floors', 'roomCount', 'hours', 'weekend')
 TEXT = {'name': (40, '건물 이름'), 'use': (20, '건물 용도')}
 NO_COMPANY = '없는 기업입니다.'
 NO_MEMBER = '없는 구성원입니다.'
+VENDOR_ONLY = '판매사 관리자만 변경할 수 있습니다.'
 LAST_MANAGER = '관리자는 최소 1명이어야 합니다.'
 AUDIT_LIMIT, AUDIT_MAX = 50, 200
 _idp = None
@@ -325,7 +326,7 @@ def assign_building(event):
 
 
 # 건물 정보 수정
-# - 대상: name(1~40자), use(1~20자), hours([시작, 종료] 0~24 정수), weekend. 층·호실은 도면 교체(PUT .../twin)로 변경
+# - 대상: name(1~40자), use(1~20자), hours([시작, 종료] 0~24 정수), weekend. 층·호실은 트윈 확정 저장(PUT /buildings/{id}/twin)으로 변경
 # - 저장: BuildingOwnersTable 항목의 overrides(트윈 Buildings 항목은 적재 스크립트가 덮어씀), 소속 없는 건물은 overrides만 있는 항목
 
 def building_fields(req):
@@ -375,13 +376,14 @@ def update_building(event):
     return common.resp(200, {'building': buildings.summary(buildings.get(b['id']))})
 
 
-# 건물 등록·도면 교체·삭제
+# 건물 등록·트윈 확정 저장(교체)·삭제
 # - 본문: {twin(트윈 파이프라인 building.json), rooms: [{id, name, floor, use, areaM2, idu}], plan: {floors: {층: {elevation?, bounds, rooms: [{id, polys, hvac}]}}}}
 #   등록은 name, use, hours, weekend 필수와 선택 id(b- + 소문자·숫자 8자리), 교체는 이 4개 필드 무시
 # - 검사: 본문 5MB 이하(413), 호실 1개 이상, 호실 id·실내기 id 중복 없음, 호실 층은 도면 층, 도면 호실은 rooms에 있음, 숫자는 유한값
 # - 호실 id 전역 고유: BY_ROOM과 시뮬레이터 스케줄 매칭이 호실 id만 비교하므로 다른 건물과 겹치면 409
-# - 저장: 트윈 twin/<건물>/building.json, 도면 plans/<건물>/v<번호>.json + current.json, 트윈 테이블 Rooms·Equipment(호실당 실내기 1대)·Buildings
-# - 교체: 빠진 호실의 Rooms·Equipment·State 행 삭제. 삭제: 파일, 테이블 행, 소속 항목, 건물 스케줄 전체 삭제
+# - 저장: 도면 버킷 plans/<건물>/ 아래 트윈 building.json + building-v<번호>.json, 도면 current.json + v<번호>.json(같은 번호)
+#   트윈 테이블 Rooms·Equipment(호실당 실내기 1대)·Buildings
+# - 교체: 빠진 호실의 Rooms·Equipment·State 행 삭제. 삭제: plans/<건물>/ 전체, 테이블 행, 소속 항목, 건물 스케줄 전체 삭제
 # - 캐시: 같은 실행 환경은 즉시(buildings.forget, tenant.forget), 다른 실행 환경은 60초 안에 반영
 # - shortcut: 단계별 기록이라 중간 실패 시 일부만 반영, 같은 요청 재시도로 복구. 트랜잭션은 건물 관리가 잦아지면 검토
 
@@ -497,12 +499,12 @@ def _sync(env, sort, bid, rows=(), keep=None):
 
 
 def _save(bid, req):
-    """트윈·도면 파일과 Rooms·Equipment 기록, 빠진 호실의 State 삭제: (도면 버전, 기존 호실 id 집합)"""
-    pat = re.compile(rf'plans/{re.escape(bid)}/v(\d+)\.json')
+    """트윈·도면 파일과 Rooms·Equipment 기록, 빠진 호실의 State 삭제: (버전, 기존 호실 id 집합)"""
+    # 버전 번호: 도면 v<n>, 트윈 building-v<n> 중 가장 큰 값 + 1(다른 경로가 한쪽만 저장해도 덮어쓰지 않음)
+    pat = re.compile(rf'plans/{re.escape(bid)}/(?:building-)?v(\d+)\.json')
     n = 1 + max((int(m.group(1)) for k in plan.keys(f'plans/{bid}/') if (m := pat.fullmatch(k))), default=0)
-    plan.put(f'twin/{bid}/building.json', req['twin'])
-    plan.put(f'plans/{bid}/v{n}.json', req['plan'])
-    plan.put(f'plans/{bid}/current.json', req['plan'])
+    for key, body in ((f'building-v{n}', req['twin']), ('building', req['twin']), (f'v{n}', req['plan']), ('current', req['plan'])):
+        plan.put(f'plans/{bid}/{key}.json', body)
     rooms = req['rooms']
     old = _sync('ROOMS_TABLE', 'roomId', bid, [{'buildingId': bid, 'roomId': r['id'], **{k: r[k] for k in ROOM_FIELDS}} for r in rooms])
     _sync('EQUIPMENT_TABLE', 'equipmentId', bid, [{'buildingId': bid, 'equipmentId': r['idu'], 'roomId': r['id'], 'floor': r['floor'],
@@ -568,7 +570,7 @@ def replace_twin(event):
     ids = {r['id'] for r in req['rooms']}
     if owner := tenant.owners().get(bid):
         tenant.audit(owner, actor(event), 'building.plan', bid, {'version': n, 'rooms': len(ids), 'added': len(ids - old), 'removed': len(old - ids)})
-    return common.resp(200, {'building': card(buildings.get(bid))})
+    return common.resp(200, {'building': card(buildings.get(bid)), 'version': n})
 
 
 def delete_building(event):
@@ -578,8 +580,7 @@ def delete_building(event):
         return common.bad_building(e)
     bid = b['id']
     # 하위 데이터 먼저 삭제, 건물 항목은 마지막: 중간 실패 시 같은 요청으로 재시도 가능
-    for prefix in (f'plans/{bid}/', f'twin/{bid}/'):
-        plan.delete(prefix)
+    plan.delete(f'plans/{bid}/')  # 도면·트윈 현재 파일과 모든 버전
     rooms = len(_sync('ROOMS_TABLE', 'roomId', bid))
     for env, sort in (('EQUIPMENT_TABLE', 'equipmentId'), ('STATE_TABLE', 'roomId')):
         _sync(env, sort, bid)
@@ -598,6 +599,15 @@ def delete_building(event):
     return common.resp(200, {'deleted': True})
 
 
+def twin(event, context):
+    """GET·PUT /buildings/{id}/twin: 조회는 plan.handler(소속 기업 구성원 허용), 확정 저장은 판매사 전용"""
+    if event.get('routeKey', '').startswith('GET '):
+        return plan.handler(event, context)
+    if tenant.caller(event)['role'] != tenant.ADMIN:
+        return common.resp(403, {'error': VENDOR_ONLY})
+    return _stored(replace_twin)(event)
+
+
 ROUTES = {
     'GET /admin/users': lambda e: common.resp(200, {'users': users()}),
     'GET /admin/companies': list_companies,
@@ -612,7 +622,6 @@ ROUTES = {
     'GET /admin/buildings': list_buildings,
     'PUT /admin/buildings/{id}/company': assign_building,
     'POST /admin/companies/{id}/buildings': _with_company(_stored(create_building)),
-    'PUT /admin/buildings/{id}/twin': _stored(replace_twin),
     'PATCH /admin/buildings/{id}': update_building,
     'DELETE /admin/buildings/{id}': _stored(delete_building),
 }

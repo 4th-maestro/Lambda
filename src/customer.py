@@ -2,7 +2,7 @@
 
 - 기업 코드 가입: POST /me/join {code}. 로그인했고 소속 기업이 없는 사용자(admin 제외)
 - 조회(구성원 전체): GET /company(기업 정보와 건물 카드, 기업 코드·구성원 목록 제외), GET /company/audit?limit=(최신순)
-- 변경 차단: PATCH /company, PATCH·DELETE /company/members/{sub}, PATCH /buildings/{id}는 구성원에게 403
+- 변경 차단: PATCH /company, PATCH·DELETE /company/members/{sub}, PATCH /buildings/{id}는 구성원에게 403(PUT /buildings/{id}/twin은 admin.twin)
   - 관리는 판매사 관리 API(admin.py)로 이동. 이전 화면 호환을 위해 경로는 유지
   - admin의 PATCH /buildings/{id}는 PATCH /admin/buildings/{id}와 같은 처리
 - 구성원 허용 운영: AI 질의(query.py, ws.py), 대화 기록 조회·삭제(chat.py), 스케줄 저장·취소(schedules.py). 소속 건물 검사만 적용
@@ -14,7 +14,6 @@ import signup
 import tenant
 
 NO_COMPANY = '소속된 기업이 없습니다.'
-VENDOR_ONLY = '판매사 관리자만 변경할 수 있습니다.'
 WRITES = ('PATCH /company', 'PATCH /company/members/{sub}', 'DELETE /company/members/{sub}', 'PATCH /buildings/{id}')
 
 
@@ -59,7 +58,7 @@ def handler(event, context):
         return join(event, ctx)
     if key in WRITES:
         if ctx['role'] != tenant.ADMIN:
-            return common.resp(403, {'error': VENDOR_ONLY})
+            return common.resp(403, {'error': admin.VENDOR_ONLY})
         # admin은 소속 기업이 없어 기업·구성원 경로는 403, 기업 관리는 /admin/companies/{id}
         return admin.update_building(event) if key == 'PATCH /buildings/{id}' else common.resp(403, {'error': NO_COMPANY})
     fn = ROUTES.get(key)

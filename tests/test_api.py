@@ -29,7 +29,7 @@ class RouteTest(unittest.TestCase):
         self.assertIs(api.route('/company/members/{sub}'), api.customer.handler)
         self.assertIs(api.route('/buildings/{id}'), api.customer.handler)
         self.assertIs(api.route('/buildings/{id}/plan'), api.plan.handler)
-        self.assertIs(api.route('/buildings/{id}/twin'), api.plan.handler)
+        self.assertIs(api.route('/buildings/{id}/twin'), api.admin.twin)
         self.assertIs(api.route('/admin/companies/{id}/buildings'), api.admin.handler)
         self.assertIs(api.route('/buildings'), api.portfolio.handler)
         self.assertIs(api.route('/admin/companies/{id}/members/{sub}'), api.admin.handler)

@@ -590,7 +590,7 @@ def upload(prefix, n, floors=('1F', '2F')):
 
 
 class VendorBuildingTest(Tenancy):
-    """판매사 건물 등록·트윈 교체·삭제(트윈 테이블·도면 버킷 가짜), 테이블 초기값은 파일 출처 4개 건물"""
+    """판매사 건물 등록·트윈 확정 저장·삭제(트윈 테이블·도면 버킷 가짜), 테이블 초기값은 파일 출처 4개 건물"""
 
     def setUp(self):
         super().setUp()
@@ -617,6 +617,9 @@ class VendorBuildingTest(Tenancy):
     def create(self, cid='co-a', **body):
         return adm('POST /admin/companies/{id}/buildings', path={'id': cid}, body={**NEW, **body})
 
+    def save(self, bid, body):
+        return adm('PUT /buildings/{id}/twin', path={'id': bid}, body=body)
+
     def rows(self, name, bid):
         return {k[1] for k in self.t[name].items if k[0] == bid}
 
@@ -633,7 +636,8 @@ class VendorBuildingTest(Tenancy):
         self.assertEqual((e['roomId'], e['type'], float(e['ratedKw'])), ('b-abcd1234.R2', 'IDU', sim.rated({'areaM2': 22})))
         self.assertEqual(self.t['O'].items['b-abcd1234'], {'buildingId': 'b-abcd1234', 'companyId': 'co-a'})
         self.assertEqual(sorted(k for k in self.s3.objects if 'b-abcd1234' in k),
-                         ['plans/b-abcd1234/current.json', 'plans/b-abcd1234/v1.json', 'twin/b-abcd1234/building.json'])
+                         ['plans/b-abcd1234/building-v1.json', 'plans/b-abcd1234/building.json', 'plans/b-abcd1234/current.json', 'plans/b-abcd1234/v1.json'])
+        self.assertEqual(json.loads(self.s3.objects['plans/b-abcd1234/building-v1.json']), upload('b-abcd1234', 3)['twin'])
         a = self.audits('building.create')[0]
         self.assertEqual((a['companyId'], a['target'], a['detail']), ('co-a', 'b-abcd1234', {'name': '새 건물', 'rooms': 3, 'floors': ['1F', '2F']}))
         # 고객사 구성원: 기업 정보, 상태, 도면·트윈 조회 가능. 다른 기업 구성원은 403
@@ -697,8 +701,8 @@ class VendorBuildingTest(Tenancy):
 
     def test_replace_twin_of_seed_building(self):
         old = self.rows('R', 'office')
-        code, body = adm('PUT /admin/buildings/{id}/twin', path={'id': 'office'}, body={'name': '무시', **upload('office.n', 2, floors=('1F',))})
-        self.assertEqual((code, body['building']['name'], body['building']['floors'], body['building']['roomCount']), (200, '업무동', ['1F'], 2))
+        code, body = self.save('office', {'name': '무시', **upload('office.n', 2, floors=('1F',))})
+        self.assertEqual((code, body['version'], body['building']['name'], body['building']['floors'], body['building']['roomCount']), (200, 2, '업무동', ['1F'], 2))
         self.assertEqual(body['building']['hours'], [8, 19])
         for name in ('R', 'S'):
             self.assertEqual(self.rows(name, 'office'), {'office.n.R0', 'office.n.R1'} if name == 'R' else set(), name)
@@ -706,22 +710,27 @@ class VendorBuildingTest(Tenancy):
         self.assertEqual(len(self.rows('R', 'edu')), len(buildings._from_files()[1]['edu']))  # 다른 건물 유지
         b = self.t['B'].items['office']
         self.assertEqual((b['floors'], b['virtual'], b['mirror'], b['remap'], b['waste']), ({'1F': '1F'}, False, False, {}, Decimal('0.18')))
-        self.assertIn('plans/office/v2.json', self.s3.objects)
+        self.assertTrue({'plans/office/v2.json', 'plans/office/building-v2.json', 'plans/office/building.json'} <= set(self.s3.objects))
         self.assertEqual(json.loads(self.s3.objects['plans/office/current.json']), upload('office.n', 2, floors=('1F',))['plan'])
+        self.assertEqual(json.loads(api.handler(http('GET /buildings/{id}/twin', path={'id': 'office'}), None)['body']), upload('office.n', 2, floors=('1F',))['twin'])
         a = self.audits('building.plan')[0]
         self.assertEqual((a['companyId'], a['detail']), ('co-a', {'version': 2, 'rooms': 2, 'added': 2, 'removed': len(old)}))
-        # 호실 1개 유지, 1개 추가: 빠진 호실의 상태 행 삭제
+        # 호실 1개 유지, 1개 추가: 빠진 호실의 상태 행 삭제. 버전은 도면·트윈 버전 파일 중 최댓값 + 1
+        self.s3.objects['plans/office/building-v4.json'] = b'{}'
         self.t['S'].put_item({'buildingId': 'office', 'roomId': 'office.n.R1', 'temp': 20})
         nxt = upload('office.n', 2, floors=('1F',))
         nxt['rooms'][0]['id'] = nxt['plan']['floors']['1F']['rooms'][0]['id'] = 'office.n.R9'
-        adm('PUT /admin/buildings/{id}/twin', path={'id': 'office'}, body=nxt)
+        self.assertEqual(self.save('office', nxt)[1]['version'], 5)
         self.assertEqual(self.rows('R', 'office'), {'office.n.R9', 'office.n.R1'})
         self.assertEqual(self.rows('S', 'office'), {'office.n.R1'})
         plans = self.audits('building.plan')
-        self.assertEqual((len(plans), plans[-1]['detail']), (2, {'version': 3, 'rooms': 2, 'added': 1, 'removed': 1}))
-        self.assertEqual(adm('PUT /admin/buildings/{id}/twin', path={'id': 'nope'}, body=nxt)[0], 400)
-        self.assertEqual(adm('PUT /admin/buildings/{id}/twin', path={'id': 'office'}, body={**nxt, 'rooms': []})[0], 400)
-        self.assertEqual(call(http('PUT /admin/buildings/{id}/twin', path={'id': 'office'}, body=nxt)), ADMIN_ONLY)
+        self.assertEqual((len(plans), plans[-1]['detail']), (2, {'version': 5, 'rooms': 2, 'added': 1, 'removed': 1}))
+        self.assertEqual(self.save('nope', nxt)[0], 400)
+        self.assertEqual(self.save('office', {**nxt, 'rooms': []})[0], 400)
+        # 구성원(소속 기업 관리자 포함)은 확정 저장 403
+        for sub in ('u-a', 'u-b', 'nobody'):
+            self.assertEqual(call(http('PUT /buildings/{id}/twin', sub=sub, path={'id': 'office'}, body=nxt)), VENDOR_ONLY, sub)
+        self.assertEqual(len(self.audits('building.plan')), 2)
 
     def test_delete_building(self):
         self.create(id='b-abcd1234', **upload('b-abcd1234', 2))

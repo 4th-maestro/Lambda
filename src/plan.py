@@ -1,19 +1,22 @@
 """건물 도면·트윈 파일: GET /buildings/{id}/plan, GET /buildings/{id}/twin → 도면 버킷 파일 그대로 응답
 
 - 형식: 도면은 내장 3D 도면(frontend/src/twin3d/Twin3D.tsx)의 floors·bounds·rooms(polys, hvac), 좌표 단위 m. 트윈은 트윈 파이프라인 building.json
-- 버킷(PLANS_BUCKET): plans/<건물>/current.json(현재), plans/<건물>/v<번호>.json(버전, 되돌리기용), twin/<건물>/building.json
-- 기록: 판매사 건물 등록·도면 교체·삭제(admin.py)가 아래 저장 함수 사용. 초기 적재는 tools/upload_plans.py
+- 버킷(PLANS_BUCKET): plans/<건물>/ 아래 도면 current.json(현재)과 v<번호>.json(버전), 트윈 building.json(현재)과 building-v<번호>.json(버전)
+  - 트윈 키는 도면 변환 규약(docs/human/reference/plan-ingest.md 4절)과 같음. 같은 저장의 도면·트윈 버전 번호는 같음
+- 기록: 판매사 건물 등록·트윈 확정 저장·삭제(admin.py)가 아래 저장 함수 사용. 초기 적재는 tools/upload_plans.py
 - 권한: admin, 또는 건물 소속 기업(사용 중)의 구성원(tenant.require_building)
 """
 import json
 import os
+import re
 
 import buildings
 import common
 import tenant
 
 # 경로 마지막 부분 → (버킷 키 형식, 파일이 없을 때 문구)
-FILES = {'plan': ('plans/{}/current.json', '등록된 도면이 없습니다.'), 'twin': ('twin/{}/building.json', '트윈 데이터가 없습니다.')}
+FILES = {'plan': ('plans/{}/current.json', '등록된 도면이 없습니다.'), 'twin': ('plans/{}/building.json', '트윈 데이터가 없습니다.')}
+TWIN_KEY = re.compile(r'plans/([^/]+)/building\.json')
 _s3 = None
 
 
@@ -52,10 +55,10 @@ def delete(prefix):
 
 
 def twin_ids():
-    """트윈 파일이 있는 건물 id 집합(목록 조회 1회). 버킷이 없으면 빈 집합"""
+    """트윈 파일(plans/<건물>/building.json)이 있는 건물 id 집합(plans/ 목록 조회 1회). 버킷이 없으면 빈 집합"""
     if not bucket():
         return set()
-    return {k.split('/')[1] for k in keys('twin/') if k.endswith('/building.json')}
+    return {m.group(1) for k in keys('plans/') if (m := TWIN_KEY.fullmatch(k))}
 
 
 def handler(event, context):
