@@ -37,10 +37,16 @@ Parameters:
     Description: 5분 판단 스케줄 실행 여부. Jev 호출 비용이 있어 기본 꺼짐
   AutoApplyConfidence:
     Type: Number
+    Default: 0.8
+    MinValue: 0.5
+    MaxValue: 1
+    Description: 자동 조치·재실 판단에 쓰는 Jev 확신도 하한(Jev 확신도는 1위 확률보다 낮게 나옴)
+  AutoApplyEmptyProb:
+    Type: Number
     Default: 0.9
     MinValue: 0.5
     MaxValue: 1
-    Description: 스위치 ON일 때 자동 조치할 Jev 확신도 하한(그 아래는 제안)
+    Description: 스위치 ON일 때 자동 조치할 Jev empty 확률 하한(확신도 기준과 함께 충족해야 함)
   SuggestionTtlMinutes:
     Type: Number
     Default: 30
@@ -141,6 +147,7 @@ Resources:
           JEV_SECRET_ID: !Ref JevApiKey
           JEV_MODEL: !Ref JevModel
           AUTO_APPLY_CONFIDENCE: !Ref AutoApplyConfidence
+          AUTO_APPLY_EMPTY_PROB: !Ref AutoApplyEmptyProb
           SUGGESTION_TTL_MIN: !Ref SuggestionTtlMinutes
           COOLDOWN_MIN: !Ref CooldownMinutes
           MAX_JEV_PER_RUN: !Ref MaxJevPerRun

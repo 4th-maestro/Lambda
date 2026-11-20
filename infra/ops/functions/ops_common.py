@@ -167,12 +167,20 @@ def delete_schedule(sid):
 
 # 문구
 
-def idle_message(room, minutes, power_kw):
-    return f"{room['floor']} {room['name']}: {minutes}분째 재실 0명인데 냉난방이 켜져 있어요({power_kw}kW). 끌까요?"
+def duration(minutes, capped=False):
+    """'30분째', '1시간 15분째', 조회 상한을 넘으면 '3시간 넘게'"""
+    if capped:
+        return f'{minutes // 60}시간 넘게'
+    h, m = divmod(minutes, 60)
+    return f"{h}시간 {m}분째" if h and m else f"{h}시간째" if h else f"{m}분째"
 
 
-def applied_message(room, minutes):
-    return f"{room['floor']} {room['name']}: {minutes}분째 재실 0명이라 냉난방을 껐어요. 필요하면 되돌릴 수 있어요."
+def idle_message(room, label, power_kw):
+    return f"{room['floor']} {room['name']}: {label} 재실 0명인데 냉난방이 켜져 있어요({power_kw}kW). 끌까요?"
+
+
+def applied_message(room, label):
+    return f"{room['floor']} {room['name']}: {label} 재실 0명이라 냉난방을 껐어요. 필요하면 되돌릴 수 있어요."
 
 
 def anomaly_message(room, st):
