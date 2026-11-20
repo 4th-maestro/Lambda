@@ -1,4 +1,4 @@
-# 도면 변환 컨테이너 Lambda(app.handler). 빌드: docker build --platform linux/amd64 -t maestro-ingest .
+# 도면 변환 컨테이너 Lambda(app.handler). 빌드: docker build --platform linux/arm64 -t maestro-ingest .
 # 1단계: libredwg dwg2dxf 정적 빌드. libredwg는 GPL-3.0이며 별도 프로세스(subprocess)로만 호출합니다.
 FROM public.ecr.aws/lambda/python:3.12 AS libredwg
 ARG LIBREDWG=0.13.3

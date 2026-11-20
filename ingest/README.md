@@ -30,6 +30,9 @@
 | 응답 | `detect` | `[{floor, imageKey, pxPerM, toPlan}]`, 인식이 필요한 층 |
 | 응답 | `warnings` | 문자열 목록(`meta.ingest.warnings`와 같음) |
 
+- `detect`는 인식 대상이 없어도 항상 목록(빈 목록 포함)입니다.
+- 도면 이미지가 있는 층에만 `floors[].background`(`{key, px, toPlan}`)가 있습니다. 이미지가 없는 층에는 `background` 키가 없습니다.
+
 - `detect` 대상은 IFC에서 실내기가 없고 설비도면 이미지가 있는 층, CAD에서 맞는 블록이 없는 층, PDF의 모든 쪽입니다.
 - 렌더링한 이미지는 `jobs/<jobId>/pages/<번호>.png`입니다. IFC와 함께 올린 PNG·JPG는 업로드 키를 그대로 `imageKey`로 씁니다.
 - `options.scale`은 PDF 축척 분모(예: 200)이며 도면 문자보다 우선합니다. `options.pxPerM`은 IFC와 함께 올린 이미지의 1m당 화소입니다.
@@ -94,15 +97,17 @@
 
 **3-1. 이미지는 2단계로 빌드합니다. 1단계에서 libredwg 0.13.3을 정적 빌드하고, 2단계에서 `dwg2dxf`와 파이썬 의존성을 설치합니다.**
 
+파이썬 의존성은 모두 aarch64 휠이 있어 arm64 이미지에서 컴파일 없이 설치됩니다. 요구 glibc 최대값은 ifcopenshell의 2.31이고, 기본 이미지는 2.34입니다. libredwg는 휠이 아닌 C 소스 빌드이며, arm64 이미지 빌드는 Docker 데몬이 꺼져 있어 확인하지 못했습니다.
+
 ```bash
 cd ingest
-docker build --platform linux/amd64 -t maestro-ingest .
+docker build --platform linux/arm64 -t maestro-ingest .
 ```
 
 | 항목 | 값 | 근거 |
 |---|---|---|
 | 기본 이미지 | `public.ecr.aws/lambda/python:3.12` | ifcopenshell 휠 `manylinux_2_31` 요구, 이미지 glibc 2.34 |
-| 아키텍처 | x86_64 | 의존성 5종의 x86_64 휠 존재 확인(2026-11-20) |
+| 아키텍처 | arm64(SAM Globals와 같음), x86_64도 가능 | aarch64 휠: 간접 의존성 포함 13종 확인. x86_64 휠: 직접 의존성 5종 확인(2026-11-20) |
 | 메모리 권장 | 3,008MB | 6,400만 화소 RGB 이미지 약 192MB와 PNG 인코딩, 미측정 |
 | 임시 저장소 권장 | 2,048MB | 업로드 파일당 한도 200MB, 미측정 |
 | 제한 시간 권장 | 900초 | 대형 IFC 형상 처리, 미측정 |
