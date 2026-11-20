@@ -6,9 +6,10 @@
 - POST /plans/detect {building, key, pxPerM?} → 202 {jobId}. 인식 전용 작업(kind detect)
   - key: 같은 건물 작업으로 올린 이미지(png, jpg). 결과는 jobs/<작업>/draft.json {floor, detections, model}
 - GET /plans/jobs/{jobId} → {jobId, building, kind, status, step, error?, draftUrl?, pages?: [{floor, url, px}]}(GET URL 15분)
+- POST /plans/jobs/{jobId}/confirm → 보정본을 판매사 건물 등록·교체 API로 저장, 작업 done 기록
 - 건물: 기존 건물 id 또는 새 건물 id(b- + 소문자·숫자 8자리). 판매사가 건물 등록 전에 도면을 변환하므로 존재를 요구하지 않음
 - 작업 기록: PLAN_JOBS_TABLE, 7일 뒤 ttl 삭제. 상태 머신(PLAN_STATE_MACHINE, statemachine/plan.asl.json)이 step, status(review·failed), draftKey, error 갱신
-- 확정본 저장은 이 모듈이 아니라 판매사 건물 관리 PUT /buildings/{id}/twin(Lambda 브랜치 feat/vendor-buildings)
+- 확정본 저장 검증은 기존 판매사 건물 관리 API를 재사용(plan_confirm.py), 기존 직접 저장 경로도 유지
 """
 import json
 import os
@@ -184,6 +185,8 @@ def status(event):
     out = {k: job.get(k) for k in ('jobId', 'building', 'kind', 'status', 'step')}
     if job.get('error'):
         out['error'] = _message(job['error'])
+    if job.get('confirmation'):
+        out.update(confirmation=buildings._plain(job['confirmation']), confirmedAt=job['confirmedAt'])
     if job.get('draftKey'):
         out['draftUrl'] = _url('get_object', job['draftKey'])
     if job.get('draftKey') and job['kind'] != 'detect':
@@ -194,11 +197,20 @@ def status(event):
     return common.resp(200, out)
 
 
+def confirm(event):
+    import plan_confirm
+    job = _job((event.get('pathParameters') or {}).get('jobId'))
+    if not job:
+        return common.resp(404, {'error': NO_JOB})
+    return plan_confirm.confirm(event, job, _put)
+
+
 ROUTES = {
     'POST /plans/jobs': create,
     'POST /plans/jobs/{jobId}/start': start,
     'POST /plans/detect': detect,
     'GET /plans/jobs/{jobId}': status,
+    'POST /plans/jobs/{jobId}/confirm': confirm,
 }
 
 

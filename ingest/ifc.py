@@ -18,9 +18,12 @@ CANDIDATES = ('IfcEnergyConversionDevice', 'IfcFlowTerminal', 'IfcFlowMovingDevi
 
 
 def _verts(el):
-    g = ifcopenshell.geom.create_shape(SETTINGS, el).geometry
-    v = g.verts
-    return [(v[i], v[i + 1], v[i + 2]) for i in range(0, len(v), 3)], g.faces
+    # Keep the owning SWIG shape alive while copying geometry; a temporary owner
+    # can free the native buffers before verts/faces are read.
+    shape = ifcopenshell.geom.create_shape(SETTINGS, el)
+    g = shape.geometry
+    v = tuple(g.verts)
+    return [(v[i], v[i + 1], v[i + 2]) for i in range(0, len(v), 3)], tuple(g.faces)
 
 
 def _footprint(el):
