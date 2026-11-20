@@ -23,6 +23,7 @@
 | `src/sim.py`, `src/rooms.json` | 가상 HVAC 상태 생성, 본관 호실 137개(공개 IFC 의원 건물) |
 | `tools/demo_status.py` | Frontend 데모 상태 생성(`frontend/public/demo/<건물>.json`, `index.json`) |
 | `tools/build_floorplans.py` | 건물별 3D 도면 생성(`frontend/public/floorplans/<건물>.json`) |
+| `ingest/` | 도면 변환 컨테이너 Lambda(IFC, DXF·DWG, PDF를 `twin.building/v1` 초안으로 변환, YOLO 인식 결과 병합). handler 계약, 빌드, 테스트는 `ingest/README.md` |
 | `src/plan.py`, `tools/upload_plans.py` | 도면·트윈 파일 API `GET /buildings/{id}/plan`(도면 버킷 `plans/<건물>/current.json`), `GET /buildings/{id}/twin`(`plans/<건물>/building.json`), 초기 적재(`--bucket <PlansBucketName>`) |
 | `src/chat.py` | `GET·DELETE /chat?building=` 사용자별 대화 기록(90일), 대화 메모리(24시간, 1KB 요약) 저장 |
 | `src/auth.py` | WebSocket 연결 인증(쿼리 token, Cognito 액세스 토큰 검증), context에 sub·groups 전달 |
@@ -37,6 +38,8 @@
 python3 -m unittest discover tests
 sam validate --lint
 ```
+
+도면 변환 Lambda(`ingest/`)는 의존성이 달라 별도 가상 환경에서 테스트하십시오. 절차는 `ingest/README.md` 4절에 있습니다.
 
 ## 배포
 
